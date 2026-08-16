@@ -1,0 +1,453 @@
+{
+  "info": {
+    "name": "ChatGPT Android Proxy",
+    "description": "API compatible con OpenAI usando el flujo anónimo de ChatGPT Android.\n\n## Setup\n1. Iniciar el servidor: `docker-compose up` o `uvicorn main:app --reload`\n2. La variable `base_url` apunta a `http://localhost:8888`\n\n## Flujo típico con archivos\n1. `POST /v1/files` → obtener `file_id`\n2. `POST /v1/chat/completions` con el `file_id` en el content multipart\n\n## Control de web search / tools\n- `web_search: true/false/null` — override directo de búsqueda\n- `force_use_tools: true` — activa tools avanzados del backend (reservas, shopping, widgets)\n- `tools: [...]` — compatibilidad OpenAI: el nombre de función mapea a flags del backend\n\n## ⚠️ NO es function calling real\nEl backend anónimo no devuelve `tool_calls`. Las tools se usan internamente y el resultado llega como texto en `choices[0].message.content`.",
+    "_postman_id": "chatgpt-proxy-v2-1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8888",
+      "type": "string"
+    },
+    {
+      "key": "file_id",
+      "value": "",
+      "type": "string",
+      "description": "Se rellena automáticamente al subir un archivo"
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Verifica el estado del servidor. Muestra sesiones activas, archivos en memoria y capacidades disponibles."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Status ok\", () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql(\"ok\");",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Models",
+      "item": [
+        {
+          "name": "List Models",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/models",
+            "description": "Lista todos los modelos disponibles en el flujo anónimo, incluyendo aliases legacy de OpenAI.\n\nModelos reales: `gpt-5-6`, `gpt-5-5`, `gpt-5-6-mini`, `gpt-5-5-mini`, `gpt-5-3-mini`, `auto`\nAliases: `gpt-4o` → `auto`, `gpt-4o-mini` → `gpt-5-3-mini`, `gpt-4` → `gpt-5-5`, `gpt-3.5-turbo` → `gpt-5-3-mini`"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Tiene modelos\", () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.data.length).to.be.above(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Files",
+      "item": [
+        {
+          "name": "Upload File (PDF o texto)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/files",
+            "description": "Sube un archivo para usarlo como contexto en el chat.\n\n**Formatos soportados:** PDF, TXT, MD, código fuente (Python, JS, etc.), JSON, XML, DOCX, XLSX\n**NO soportado:** imágenes (devuelve error 415)\n**Límite:** 20 MB\n\nEl `file_id` retornado se usa en `/v1/chat/completions` con `type: 'file'`.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Selecciona un PDF, TXT, código fuente, etc."
+                },
+                {
+                  "key": "purpose",
+                  "value": "assistants",
+                  "type": "text",
+                  "description": "Para compatibilidad con OpenAI (no cambia el comportamiento)"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Tiene file_id\", () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.id).to.match(/^file-/);",
+                  "    pm.collectionVariables.set(\"file_id\", json.id);",
+                  "    console.log(\"file_id guardado:\", json.id);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Files",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/files",
+            "description": "Lista todos los archivos subidos en la sesión actual del servidor (almacenados en memoria)."
+          }
+        },
+        {
+          "name": "Get File Metadata",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/files/{{file_id}}",
+            "description": "Obtiene los metadatos de un archivo específico. El contenido de texto no se devuelve en este endpoint."
+          }
+        },
+        {
+          "name": "Delete File",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/v1/files/{{file_id}}",
+            "description": "Elimina un archivo de la memoria del servidor."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Deleted\", () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.deleted).to.be.true;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Chat Completions",
+      "item": [
+        {
+          "name": "Chat Simple (sin streaming)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-6\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cuál es la capital de Colombia?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Petición básica de chat. Devuelve la respuesta completa en un solo JSON."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Tiene choices\", () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.choices[0].message.content).to.be.a('string').and.not.empty;",
+                  "    console.log(\"Respuesta:\", json.choices[0].message.content.substring(0, 100));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chat con System Prompt",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Eres un asistente experto en geografía colombiana. Responde siempre con datos precisos y menciona datos curiosos.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"¿Cuántos departamentos tiene Colombia?\"\n    }\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "El `system` message se inyecta como instrucciones en el primer turno de la sesión.\n\nNota: el system prompt es persistente en la sesión y solo se aplica en el primer turno. Sesiones con distintos system prompts usan sesiones separadas."
+          }
+        },
+        {
+          "name": "Chat con Streaming (SSE)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Accept", "value": "text/event-stream"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-3-mini\",\n  \"stream\": true,\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Escribe un poema corto sobre Bogotá.\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Con `stream: true`, la respuesta es un flujo SSE (text/event-stream).\n\nEl formato de cada chunk es:\n```\ndata: {\"id\":\"chatcmpl-xxx\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"texto\"},\"finish_reason\":null}]}\n```\nEl flujo termina con:\n```\ndata: [DONE]\n```\n\n⚠️ Postman puede no renderizar bien el streaming — usar curl para verlo en tiempo real:\n```bash\ncurl -N -X POST http://localhost:8000/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"gpt-5-3-mini\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Hola\"}]}'\n```"
+          }
+        },
+        {
+          "name": "Chat Multi-turno",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-5\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Hola, me llamo Carlos y soy ingeniero de software.\"},\n    {\"role\": \"assistant\", \"content\": \"¡Hola Carlos! Es un gusto conocerte. ¿En qué área de software te especializas?\"},\n    {\"role\": \"user\", \"content\": \"¿Recuerdas mi nombre y profesión?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "El proxy detecta el historial de mensajes para enrutar a la sesión correcta (multi-turno).\n\n**Cómo funciona:** El array `messages` completo (excepto el último `user`) se hashea para identificar la sesión. Mientras mandes el historial completo, el proxy mantiene el contexto con ChatGPT.\n\nLas sesiones expiran después de 30 minutos de inactividad."
+          }
+        },
+        {
+          "name": "Chat con Archivo Adjunto (file_id)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-5\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"Resume el documento adjunto en 3 puntos clave y extrae las ideas principales.\"\n        },\n        {\n          \"type\": \"file\",\n          \"file\": {\n            \"file_id\": \"{{file_id}}\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Envía un mensaje con un archivo adjunto referenciado por `file_id`.\n\n**Flujo:**\n1. Primero sube el archivo con `POST /v1/files` → obtienes `file_id`\n2. Usa ese `file_id` aquí\n\nEl contenido de texto del archivo se inyecta automáticamente en el mensaje antes de enviarlo a ChatGPT.\n\n**Tipos de content soportados:**\n- `{\"type\": \"text\", \"text\": \"...\"}` — texto libre\n- `{\"type\": \"file\", \"file\": {\"file_id\": \"...\"}}` — archivo subido previamente\n\n**NO soportado:**\n- `{\"type\": \"image_url\", \"image_url\": {...}}` — devuelve error 400"
+          }
+        },
+        {
+          "name": "Chat con Modelo Legacy (alias)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-4o\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cuál es la diferencia entre TCP y UDP?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Los aliases legacy se traducen automáticamente al modelo real:\n- `gpt-4o` → `auto`\n- `gpt-4o-mini` → `gpt-5-3-mini`\n- `gpt-4` → `gpt-5-5`\n- `gpt-3.5-turbo` → `gpt-5-3-mini`\n\nÚtil para compatibilidad con clientes que ya usan los modelos viejos de OpenAI."
+          }
+        },
+        {
+          "name": "Chat con GPT-5.6 Luna (más capaz)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-6\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Eres un experto en arquitectura de software. Responde de forma técnica y detallada.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Explica el patrón CQRS y cuándo usarlo.\"\n    }\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "GPT-5.6 Luna es el modelo más capaz disponible en el flujo anónimo."
+          }
+        },
+        {
+          "name": "Chat con Web Search forzado",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"web_search\": true,\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cuál fue la noticia más importante de hoy en Colombia?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Usa `web_search: true` para forzar que el backend busque en la web antes de responder.\n\n**Valores posibles:**\n- `true` → búsqueda web siempre activa\n- `false` → búsqueda web desactivada (sólo conocimiento del modelo)\n- omitido / `null` → el modelo decide automáticamente (default)\n\nEl campo se mapea directamente a `force_use_search` en el request interno al backend de ChatGPT Android."
+          }
+        },
+        {
+          "name": "Chat con force_use_tools (tools avanzados)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"force_use_tools\": true,\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Busca restaurantes italianos en Bogotá con disponibilidad para 2 personas esta noche.\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Usa `force_use_tools: true` para activar el modo tools avanzado del backend anónimo.\n\nHabilita capacidades adicionales:\n- Búsqueda web (rápida y profunda)\n- Reservas de restaurantes en tiempo real\n- Búsqueda de productos / shopping\n- Widgets interactivos (clima, deportes, calculadora, conversión de moneda)\n- Canvas (documentos colaborativos)\n- Plugins y conectores\n- Búsqueda de imágenes\n\n**Descubrimiento empírico**: este campo existe en el protocolo del backend Android pero no está documentado. El campo `force_use_search` también existe (`web_search` en esta API)."
+          }
+        },
+        {
+          "name": "Chat sin Web Search",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"web_search\": false,\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Qué es el patrón de diseño Strategy?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Usa `web_search: false` para desactivar la búsqueda web y usar sólo el conocimiento interno del modelo.\n\nÚtil para preguntas de conocimiento general o código donde la búsqueda en línea no añade valor."
+          }
+        },
+        {
+          "name": "[OpenAI tools] Solo web_search tool → force_use_search",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"web_search\",\n        \"description\": \"Busca información actualizada en la web\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"query\": {\"type\": \"string\", \"description\": \"Consulta de búsqueda\"}\n          },\n          \"required\": [\"query\"]\n        }\n      }\n    }\n  ],\n  \"tool_choice\": \"auto\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cuáles son las últimas noticias sobre inteligencia artificial?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Compatibilidad con el formato estándar de OpenAI `tools`.\n\n**Mapeo:** nombre de función `web_search` → `force_use_search: true` en el backend.\n\n**⚠️ La respuesta NO es tool_calls** — el backend busca en la web internamente y devuelve el resultado como texto en `choices[0].message.content`.\n\nNombres que activan búsqueda web: `web_search`, `search`, `brave_search`, `bing_search`, `google_search`."
+          }
+        },
+        {
+          "name": "[OpenAI tools] chatgpt_tools → force_use_tools (avanzado)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"chatgpt_tools\",\n        \"description\": \"Activa todas las herramientas avanzadas del backend de ChatGPT\",\n        \"parameters\": {\"type\": \"object\", \"properties\": {}}\n      }\n    }\n  ],\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Busca restaurantes japoneses en Bogotá y muéstrame los mejor calificados con disponibilidad esta noche.\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Compatibilidad OpenAI con activación de tools avanzados.\n\n**Mapeo:** nombre `chatgpt_tools` → `force_use_tools: true` en el backend.\n\nActiva: reservas de restaurantes, shopping, widgets (clima, moneda, deportes), canvas, plugins.\n\nOtros nombres equivalentes: `all_tools`, `builtin_tools`."
+          }
+        },
+        {
+          "name": "[OpenAI tools] Función custom → force_use_tools",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Obtiene el clima actual de una ciudad\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"city\": {\"type\": \"string\", \"description\": \"Nombre de la ciudad\"}\n          },\n          \"required\": [\"city\"]\n        }\n      }\n    }\n  ],\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cómo está el clima en Bogotá ahora mismo?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Cualquier nombre de función no reconocido → `force_use_tools: true`.\n\nLa definición de la función (`parameters`, etc.) es IGNORADA por el backend — el backend no ejecuta funciones reales. Solo el nombre se usa para el mapeo.\n\n**Resultado esperado:** el backend activará sus tools internos y responderá con información del clima como texto. NO devolverá `tool_calls` con argumentos para que el cliente ejecute `get_weather`."
+          }
+        },
+        {
+          "name": "[OpenAI tools] tool_choice: none → desactiva todo",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"web_search\",\n        \"description\": \"Busca en la web\",\n        \"parameters\": {\"type\": \"object\", \"properties\": {}}\n      }\n    }\n  ],\n  \"tool_choice\": \"none\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"¿Cuál es la capital de Francia?\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "`tool_choice: \"none\"` desactiva todos los modos aunque haya tools en el array.\n\nEquivale a poner `web_search: false` y `force_use_tools: false` — el modelo responde solo con su conocimiento interno, sin usar herramientas del backend."
+          }
+        },
+        {
+          "name": "[OpenAI tools] Mixed: web_search + custom tool",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"web_search\",\n        \"description\": \"Busca en la web\",\n        \"parameters\": {\"type\": \"object\", \"properties\": {}}\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"book_restaurant\",\n        \"description\": \"Hace una reserva en un restaurante\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"name\": {\"type\": \"string\"},\n            \"date\": {\"type\": \"string\"},\n            \"guests\": {\"type\": \"integer\"}\n          }\n        }\n      }\n    }\n  ],\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Busca restaurantes italianos en Bogotá y reserva uno para 2 personas esta noche.\"}\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "Mix de tools: al menos una no es de búsqueda → activa `force_use_tools: true` + `force_use_search: true`.\n\nRegla: si el array tiene tools de búsqueda Y otras → se activan ambos modos."
+          }
+        },
+        {
+          "name": "⚠️ Image URL (error esperado)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gpt-5-6\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\"type\": \"text\", \"text\": \"¿Qué hay en esta imagen?\"},\n        {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://example.com/image.jpg\"}}\n      ]\n    }\n  ]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "description": "⚠️ Este request devuelve error 400 intencionalmente.\n\nEl flujo anónimo de ChatGPT Android NO soporta visión (imágenes como input). Usar `type: 'image_url'` devuelve:\n```json\n{\"detail\": \"image_url no está disponible en el flujo anónimo. Usa archivos de texto (type='file') en su lugar.\"}\n```"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Error esperado 400\", () => pm.response.to.have.status(400));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

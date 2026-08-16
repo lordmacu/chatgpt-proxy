@@ -1,0 +1,11 @@
+services:
+  chatgpt-proxy:
+    build: .
+    ports:
+      - "8888:8000"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1

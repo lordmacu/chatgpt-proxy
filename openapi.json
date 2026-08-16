@@ -1,0 +1,705 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ChatGPT Android Proxy",
+    "description": "API compatible con OpenAI usando el flujo anónimo de ChatGPT Android.\n\n## Capacidades del flujo anónimo\n\n| Feature | Disponible |\n|---------|------------|\n| Chat de texto | ✅ |\n| Streaming SSE | ✅ |\n| Multi-turno (30 min TTL) | ✅ |\n| System prompt | ✅ |\n| Adjuntos PDF/código/docs | ✅ |\n| Web search (auto / forzado / desactivado) | ✅ |\n| Tools avanzados (reservas, shopping, widgets) | ✅ |\n| Imágenes como input (vision) | ❌ |\n| Generación de imágenes | ❌ |\n| Function calling / tool_calls en respuesta | ❌ |\n| Voice / TTS | ❌ |\n\n## Modelos disponibles\n\n| ID | Descripción |\n|----|-------------|\n| `gpt-5-6` | GPT-5.6 Luna (más capaz) |\n| `gpt-5-5` | GPT-5.5 |\n| `gpt-5-6-mini` | GPT-5.6 Luna Mini |\n| `gpt-5-5-mini` | GPT-5.5 Mini |\n| `gpt-5-3-mini` | GPT-5.3 Mini (más rápido) |\n| `auto` | Selección automática del servidor |\n| `gpt-4o` | Alias → `auto` |\n| `gpt-4o-mini` | Alias → `gpt-5-3-mini` |\n| `gpt-4` | Alias → `gpt-5-5` |\n| `gpt-3.5-turbo` | Alias → `gpt-5-3-mini` |\n\n## Control de tools / búsqueda web\n\n### Campos directos (extensiones propias)\n| Campo | Tipo | Efecto |\n|-------|------|--------|\n| `web_search` | `boolean\\|null` | `true`=forzar búsqueda, `false`=desactivar, `null`=automático |\n| `force_use_tools` | `boolean\\|null` | `true`=activar tools avanzados del backend (reservas, shopping, widgets, canvas) |\n\n### Campo `tools` (compatibilidad OpenAI — input only)\nEl array `tools` se acepta pero el backend **no devuelve `tool_calls`** — la respuesta es siempre texto (`choices[0].message.content`).\nLos nombres de función se mapean a flags internos:\n\n| Nombre de función | Efecto |\n|-------------------|--------|\n| `web_search`, `search`, `brave_search`, `bing_search`, `google_search` | `force_use_search = true` |\n| `chatgpt_tools`, `all_tools`, `builtin_tools` | `force_use_tools = true` |\n| Cualquier otro nombre | `force_use_tools = true` |\n| `tool_choice: \"none\"` | Desactiva ambos modos |\n\nLos campos directos (`web_search`, `force_use_tools`) tienen prioridad sobre el array `tools`.\n",
+    "version": "2.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8888",
+      "description": "Local development"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Estado del servidor: sesiones activas, archivos en memoria, capacidades.",
+        "operationId": "health",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {"type": "string", "example": "ok"},
+                    "sessions": {"type": "integer", "example": 2},
+                    "files_in_memory": {"type": "integer", "example": 1},
+                    "anonymous_models": {"type": "array", "items": {"type": "string"}},
+                    "capabilities": {"type": "object"}
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "sessions": 0,
+                  "files_in_memory": 0,
+                  "anonymous_models": ["gpt-5-6", "gpt-5-5", "gpt-5-6-mini", "gpt-5-5-mini", "gpt-5-3-mini", "auto"],
+                  "capabilities": {
+                    "text_chat": true,
+                    "streaming": true,
+                    "multi_turn": true,
+                    "system_prompt": true,
+                    "file_attachments": true,
+                    "image_input": false,
+                    "image_generation": false,
+                    "web_search": false,
+                    "voice": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "List Models",
+        "description": "Devuelve los modelos disponibles en el flujo anónimo, incluyendo aliases legacy de OpenAI.",
+        "operationId": "list_models",
+        "tags": ["Models"],
+        "responses": {
+          "200": {
+            "description": "Lista de modelos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {"type": "string", "example": "list"},
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {"type": "string"},
+                          "object": {"type": "string"},
+                          "created": {"type": "integer"},
+                          "owned_by": {"type": "string"},
+                          "description": {"type": "string"}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files": {
+      "post": {
+        "summary": "Upload File",
+        "description": "Sube un archivo (PDF, código, documentos) para usarlo como contexto en mensajes de chat.\n\n**Formatos soportados:** PDF, texto plano, código fuente, Markdown, DOCX, XLSX, JSON, XML, etc.\n\n**NO soportado:** Imágenes (JPEG, PNG, GIF, WebP) — el flujo anónimo no tiene capacidad de visión.\n\nEl archivo se almacena en memoria y puede referenciarse mediante su `file_id` en mensajes de chat.\n\nSi `pdfplumber` está instalado, extrae el texto de PDFs correctamente. Si no, hace un fallback básico.",
+        "operationId": "upload_file",
+        "tags": ["Files"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Archivo a subir (PDF, texto, código, etc.)"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "default": "assistants",
+                    "description": "Propósito del archivo (para compatibilidad con OpenAI)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Archivo subido exitosamente",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "string", "example": "file-a1b2c3d4e5f6a1b2c3d4e5f6"},
+                    "object": {"type": "string", "example": "file"},
+                    "filename": {"type": "string", "example": "documento.pdf"},
+                    "purpose": {"type": "string", "example": "assistants"},
+                    "bytes": {"type": "integer", "example": 123456},
+                    "created_at": {"type": "integer", "example": 1750000000},
+                    "status": {"type": "string", "example": "processed"}
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Archivo demasiado grande (límite: 20 MB)"
+          },
+          "415": {
+            "description": "Tipo de archivo no soportado (imágenes rechazadas)"
+          },
+          "422": {
+            "description": "El archivo no contiene texto extraíble"
+          }
+        }
+      },
+      "get": {
+        "summary": "List Files",
+        "description": "Lista todos los archivos subidos en esta sesión del servidor.",
+        "operationId": "list_files",
+        "tags": ["Files"],
+        "responses": {
+          "200": {
+            "description": "Lista de archivos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {"type": "string", "example": "list"},
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {"type": "string"},
+                          "object": {"type": "string"},
+                          "filename": {"type": "string"},
+                          "purpose": {"type": "string"},
+                          "size": {"type": "integer"},
+                          "created_at": {"type": "integer"},
+                          "mime_type": {"type": "string"}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}": {
+      "get": {
+        "summary": "Get File",
+        "description": "Obtiene los metadatos de un archivo específico (sin el contenido de texto).",
+        "operationId": "get_file",
+        "tags": ["Files"],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "example": "file-a1b2c3d4e5f6a1b2c3d4e5f6"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadatos del archivo"
+          },
+          "404": {
+            "description": "Archivo no encontrado"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete File",
+        "description": "Elimina un archivo de la memoria del servidor.",
+        "operationId": "delete_file",
+        "tags": ["Files"],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "example": "file-a1b2c3d4e5f6a1b2c3d4e5f6"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archivo eliminado",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "file-a1b2c3d4e5f6a1b2c3d4e5f6",
+                  "object": "file",
+                  "deleted": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Archivo no encontrado"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Chat Completions",
+        "description": "Endpoint principal de chat, compatible con la API de OpenAI.\n\n## Características\n\n- **Modelos**: `gpt-5-6`, `gpt-5-5`, `gpt-5-6-mini`, `gpt-5-5-mini`, `gpt-5-3-mini`, `auto` (y aliases legacy)\n- **Streaming**: pasar `stream: true` para recibir SSE\n- **System prompt**: mensajes con `role: \"system\"` son inyectados en el primer turno\n- **Multi-turno**: las sesiones se mantienen por 30 min. El historial del array `messages` enruta a la sesión correcta\n- **Archivos**: referencias a `file_id` en el content multipart se inyectan como texto\n- **Web search**: controlable con `web_search: true/false/null` (o usando `tools` con `web_search` tool)\n- **Tools avanzados**: `force_use_tools: true` activa reservas, shopping, widgets, canvas en el backend\n- **Compatibilidad `tools` OpenAI**: el array `tools` se acepta y los nombres de función se mapean a flags del backend\n\n## ⚠️ Limitación importante: no hay `tool_calls` en la respuesta\n\nEl backend anónimo de ChatGPT Android **no expone llamadas a herramientas** en formato OpenAI. Las tools se usan internamente y el resultado llega integrado en `choices[0].message.content` (texto). El campo `tools` en el request sirve solo para activar el modo correcto en el backend, no para function-calling clásico.\n\n## Limitaciones adicionales\n\n- `image_url` en el content devuelve error 400 (vision no disponible en anónimo)\n- No hay generación de imágenes\n",
+        "operationId": "chat_completions",
+        "tags": ["Chat"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              },
+              "examples": {
+                "simple": {
+                  "summary": "Chat simple",
+                  "value": {
+                    "model": "gpt-5-6",
+                    "messages": [
+                      {"role": "user", "content": "¿Cuál es la capital de Colombia?"}
+                    ]
+                  }
+                },
+                "with_system": {
+                  "summary": "Con system prompt",
+                  "value": {
+                    "model": "auto",
+                    "messages": [
+                      {"role": "system", "content": "Eres un asistente que responde siempre en español con un tono formal."},
+                      {"role": "user", "content": "¿Qué es machine learning?"}
+                    ]
+                  }
+                },
+                "streaming": {
+                  "summary": "Streaming SSE",
+                  "value": {
+                    "model": "gpt-5-3-mini",
+                    "stream": true,
+                    "messages": [
+                      {"role": "user", "content": "Escribe un poema corto sobre el mar."}
+                    ]
+                  }
+                },
+                "with_file": {
+                  "summary": "Con archivo adjunto (file_id)",
+                  "value": {
+                    "model": "gpt-5-5",
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": [
+                          {"type": "text", "text": "Resume el documento adjunto en 3 puntos clave."},
+                          {"type": "file", "file": {"file_id": "file-a1b2c3d4e5f6a1b2c3d4e5f6"}}
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "multi_turn": {
+                  "summary": "Multi-turno",
+                  "value": {
+                    "model": "auto",
+                    "messages": [
+                      {"role": "user", "content": "Hola, me llamo Juan."},
+                      {"role": "assistant", "content": "¡Hola Juan! ¿En qué te puedo ayudar?"},
+                      {"role": "user", "content": "¿Recuerdas cómo me llamo?"}
+                    ]
+                  }
+                },
+                "legacy_model": {
+                  "summary": "Con modelo legacy (alias)",
+                  "value": {
+                    "model": "gpt-4o",
+                    "messages": [
+                      {"role": "user", "content": "Explica brevemente qué es una API REST."}
+                    ]
+                  }
+                },
+                "web_search_on": {
+                  "summary": "Web search forzado (campo directo)",
+                  "value": {
+                    "model": "auto",
+                    "web_search": true,
+                    "messages": [
+                      {"role": "user", "content": "¿Cuál fue la noticia más importante de hoy en Colombia?"}
+                    ]
+                  }
+                },
+                "web_search_off": {
+                  "summary": "Web search desactivado",
+                  "value": {
+                    "model": "auto",
+                    "web_search": false,
+                    "messages": [
+                      {"role": "user", "content": "¿Qué es el patrón de diseño Strategy?"}
+                    ]
+                  }
+                },
+                "force_use_tools": {
+                  "summary": "Tools avanzados (reservas, shopping, widgets)",
+                  "value": {
+                    "model": "auto",
+                    "force_use_tools": true,
+                    "messages": [
+                      {"role": "user", "content": "Busca restaurantes italianos en Bogotá con disponibilidad para 2 personas esta noche."}
+                    ]
+                  }
+                },
+                "tools_openai_web_search": {
+                  "summary": "OpenAI tools — solo web_search tool",
+                  "description": "Nombre de función 'web_search' → mapea a force_use_search=true. La respuesta llega como texto, no como tool_calls.",
+                  "value": {
+                    "model": "auto",
+                    "tools": [
+                      {
+                        "type": "function",
+                        "function": {
+                          "name": "web_search",
+                          "description": "Busca información en la web",
+                          "parameters": {
+                            "type": "object",
+                            "properties": {
+                              "query": {"type": "string"}
+                            },
+                            "required": ["query"]
+                          }
+                        }
+                      }
+                    ],
+                    "tool_choice": "auto",
+                    "messages": [
+                      {"role": "user", "content": "¿Cuáles son las últimas noticias sobre inteligencia artificial?"}
+                    ]
+                  }
+                },
+                "tools_openai_all_tools": {
+                  "summary": "OpenAI tools — chatgpt_tools (activa force_use_tools)",
+                  "description": "Nombre 'chatgpt_tools' → mapea a force_use_tools=true. Activa reservas, shopping, widgets, canvas.",
+                  "value": {
+                    "model": "auto",
+                    "tools": [
+                      {
+                        "type": "function",
+                        "function": {
+                          "name": "chatgpt_tools",
+                          "description": "Activa todas las herramientas avanzadas de ChatGPT",
+                          "parameters": {"type": "object", "properties": {}}
+                        }
+                      }
+                    ],
+                    "messages": [
+                      {"role": "user", "content": "Busca restaurantes japoneses en Bogotá y muéstrame los mejor calificados."}
+                    ]
+                  }
+                },
+                "tools_openai_custom": {
+                  "summary": "OpenAI tools — función custom (activa force_use_tools)",
+                  "description": "Cualquier nombre de función no reconocido → force_use_tools=true. La definición de la función es ignorada por el backend; solo el nombre importa para el mapeo.",
+                  "value": {
+                    "model": "auto",
+                    "tools": [
+                      {
+                        "type": "function",
+                        "function": {
+                          "name": "get_weather",
+                          "description": "Obtiene el clima actual de una ciudad",
+                          "parameters": {
+                            "type": "object",
+                            "properties": {
+                              "city": {"type": "string"}
+                            },
+                            "required": ["city"]
+                          }
+                        }
+                      }
+                    ],
+                    "messages": [
+                      {"role": "user", "content": "¿Cómo está el clima en Bogotá ahora mismo?"}
+                    ]
+                  }
+                },
+                "tools_disabled": {
+                  "summary": "tool_choice: none — desactiva todos los modos",
+                  "description": "tool_choice 'none' desactiva force_use_search y force_use_tools. El modelo responde solo con su conocimiento interno.",
+                  "value": {
+                    "model": "auto",
+                    "tools": [
+                      {
+                        "type": "function",
+                        "function": {
+                          "name": "web_search",
+                          "description": "Busca en la web",
+                          "parameters": {"type": "object", "properties": {}}
+                        }
+                      }
+                    ],
+                    "tool_choice": "none",
+                    "messages": [
+                      {"role": "user", "content": "¿Cuál es la capital de Francia?"}
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Respuesta del modelo. Si `stream=false`, es un JSON completo. Si `stream=true`, es un flujo SSE (text/event-stream).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "string", "example": "chatcmpl-abc123"},
+                    "object": {"type": "string", "example": "chat.completion"},
+                    "created": {"type": "integer"},
+                    "model": {"type": "string"},
+                    "choices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "index": {"type": "integer"},
+                          "message": {
+                            "type": "object",
+                            "properties": {
+                              "role": {"type": "string"},
+                              "content": {"type": "string"}
+                            }
+                          },
+                          "finish_reason": {"type": "string"}
+                        }
+                      }
+                    },
+                    "usage": {
+                      "type": "object",
+                      "properties": {
+                        "prompt_tokens": {"type": "integer"},
+                        "completion_tokens": {"type": "integer"},
+                        "total_tokens": {"type": "integer"}
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "id": "chatcmpl-abc123def456",
+                  "object": "chat.completion",
+                  "created": 1750000000,
+                  "model": "gpt-5-6",
+                  "choices": [
+                    {
+                      "index": 0,
+                      "message": {"role": "assistant", "content": "La capital de Colombia es Bogotá."},
+                      "finish_reason": "stop"
+                    }
+                  ],
+                  "usage": {"prompt_tokens": -1, "completion_tokens": 8, "total_tokens": 8}
+                }
+              },
+              "text/event-stream": {
+                "schema": {"type": "string"},
+                "example": "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"La \"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Request inválido (no hay mensajes de usuario, imagen en contenido, etc.)"
+          },
+          "500": {
+            "description": "Error interno al contactar con el backend de ChatGPT"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ContentPart": {
+        "type": "object",
+        "description": "Un fragmento de contenido en un mensaje multipart.",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["text", "file", "image_url"],
+            "description": "Tipo de contenido. `image_url` devuelve error (no disponible en anónimo)."
+          },
+          "text": {
+            "type": "string",
+            "description": "Texto del mensaje (cuando type='text')",
+            "example": "¿Cuál es el contenido del documento?"
+          },
+          "file": {
+            "type": "object",
+            "description": "Referencia a un archivo previamente subido (cuando type='file')",
+            "properties": {
+              "file_id": {
+                "type": "string",
+                "description": "ID del archivo retornado por POST /v1/files",
+                "example": "file-a1b2c3d4e5f6a1b2c3d4e5f6"
+              }
+            }
+          },
+          "image_url": {
+            "type": "object",
+            "description": "⚠️ NO SOPORTADO en el flujo anónimo. Devuelve error 400.",
+            "properties": {
+              "url": {"type": "string"}
+            }
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant"],
+            "description": "`system`: instrucciones persistentes (primer turno). `user`: mensaje del usuario. `assistant`: respuesta anterior (para multi-turno)."
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Texto plano",
+                "example": "¿Cuál es la capital de Colombia?"
+              },
+              {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/ContentPart"},
+                "description": "Contenido multipart (texto + archivos)"
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "description": "Nombre del participante (opcional)"
+          }
+        }
+      },
+      "ToolFunction": {
+        "type": "object",
+        "description": "Definición de una función en el array tools.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Nombre de la función. Controla qué modo se activa en el backend:\n- `web_search` / `search` / `brave_search` / `bing_search` / `google_search` → `force_use_search=true`\n- `chatgpt_tools` / `all_tools` / `builtin_tools` → `force_use_tools=true`\n- Cualquier otro nombre → `force_use_tools=true`"
+          },
+          "description": {"type": "string"},
+          "parameters": {"type": "object"}
+        },
+        "required": ["name"]
+      },
+      "Tool": {
+        "type": "object",
+        "description": "Herramienta en formato OpenAI. El backend anónimo no ejecuta funciones reales ni devuelve tool_calls — el nombre se usa solo para activar el modo correcto.",
+        "properties": {
+          "type": {"type": "string", "enum": ["function"], "default": "function"},
+          "function": {"$ref": "#/components/schemas/ToolFunction"}
+        },
+        "required": ["type", "function"]
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "default": "auto",
+            "description": "Modelo a usar. Ver /v1/models para lista completa.",
+            "example": "gpt-5-6",
+            "enum": ["gpt-5-6", "gpt-5-5", "gpt-5-6-mini", "gpt-5-5-mini", "gpt-5-3-mini", "auto", "gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"]
+          },
+          "messages": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/Message"},
+            "description": "Historial de mensajes. El último `user` es el mensaje actual."
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false,
+            "description": "Si true, devuelve SSE (text/event-stream) en lugar de JSON completo."
+          },
+          "tools": {
+            "type": "array",
+            "nullable": true,
+            "items": {"$ref": "#/components/schemas/Tool"},
+            "description": "Array de herramientas en formato OpenAI. **Input-only** — el backend anónimo no devuelve `tool_calls`. Los nombres de función controlan qué modo se activa (ver `ToolFunction.name`). Las definiciones de parámetros son ignoradas por el backend."
+          },
+          "tool_choice": {
+            "oneOf": [
+              {"type": "string", "enum": ["none", "auto", "required"]},
+              {"type": "object"}
+            ],
+            "nullable": true,
+            "description": "`none` desactiva todos los modos (force_use_search=false, force_use_tools=false). `auto`/`required` activan los modos inferidos desde el array `tools`. Ignorado si `tools` está vacío."
+          },
+          "web_search": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "**Extensión propia.** Controla `force_use_search` en el backend:\n- `true` → búsqueda web siempre activa\n- `false` → búsqueda web desactivada\n- `null` / omitido → el modelo decide automáticamente\n\nTiene prioridad sobre el array `tools`.",
+            "example": true
+          },
+          "force_use_tools": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "**Extensión propia.** Activa el modo tools avanzado del backend anónimo (`force_use_tools`). Habilita: reservas de restaurantes, shopping, widgets interactivos (clima, deportes, conversión de moneda), canvas, plugins.\n\nTiene prioridad sobre el array `tools`.",
+            "example": true
+          },
+          "temperature": {
+            "type": "number",
+            "nullable": true,
+            "description": "Ignorada — incluida por compatibilidad con OpenAI."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "top_p": {
+            "type": "number",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "presence_penalty": {
+            "type": "number",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "frequency_penalty": {
+            "type": "number",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "stop": {
+            "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "seed": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          },
+          "n": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+          }
+        }
+      }
+    }
+  }
+}
