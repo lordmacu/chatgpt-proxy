@@ -764,6 +764,29 @@ if (dSys && mSys) {
   mSys.addEventListener('input', () => dSys.value = mSys.value);
 }
 
+// Hint animation — show settings panel briefly on first visit (mobile only)
+if (btnHamburger && settingsPanel && window.innerWidth <= 640 && !localStorage.getItem('menu-hint-seen')) {
+  setTimeout(() => {
+    settingsPanel.classList.add('open');
+    btnHamburger.style.color = 'var(--accent)';
+    if (mobileModel && desktopModel.options.length > 1) {
+      mobileModel.innerHTML = desktopModel.innerHTML;
+      mobileModel.value = desktopModel.value;
+    }
+    setTimeout(() => {
+      settingsPanel.style.transition = 'opacity .4s ease';
+      settingsPanel.style.opacity = '0';
+      setTimeout(() => {
+        settingsPanel.classList.remove('open');
+        settingsPanel.style.transition = '';
+        settingsPanel.style.opacity = '';
+        btnHamburger.style.color = '';
+        localStorage.setItem('menu-hint-seen', '1');
+      }, 420);
+    }, 1600);
+  }, 700);
+}
+
 // Toggle panel
 if (btnHamburger && settingsPanel) {
   btnHamburger.addEventListener('click', e => {
