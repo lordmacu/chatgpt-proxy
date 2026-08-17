@@ -409,6 +409,12 @@ class ChatGPTSession:
             data_str = line[5:].strip()
             if data_str == "[DONE]":
                 _log(f"[DONE] after {line_count} lines. buf: {buf[:80]!r}")
+                # Close the socket immediately — avoids httpx draining the remaining
+                # HTTP body (ChatGPT keeps sending after [DONE]) which blocks for seconds.
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
                 break
 
             try:
