@@ -1,14 +1,18 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "ChatGPT Android Proxy",
+    "title": "chatgpt-proxy",
     "description": "API compatible con OpenAI usando el flujo anónimo de ChatGPT Android.\n\n## Capacidades del flujo anónimo\n\n| Feature | Disponible |\n|---------|------------|\n| Chat de texto | ✅ |\n| Streaming SSE | ✅ |\n| Multi-turno (30 min TTL) | ✅ |\n| System prompt | ✅ |\n| Adjuntos PDF/código/docs | ✅ |\n| Web search (auto / forzado / desactivado) | ✅ |\n| Tools avanzados + genui widgets (clima, deportes, reservas) | ✅ |\n| Canvas (documentos colaborativos) | ✅ |\n| `search_metadata` en respuesta (queries + fuentes + título) | ✅ |\n| `widgets` en respuesta (genui widgets JSON) | ✅ |\n| Imágenes como input (vision) | ❌ |\n| Generación de imágenes | ❌ |\n| Function calling / tool_calls en respuesta | ❌ |\n| Voice / TTS | ❌ |\n\n## Modelos disponibles\n\n| ID | Descripción |\n|----|-------------|\n| `gpt-5-6` | GPT-5.6 Luna (más capaz) |\n| `gpt-5-5` | GPT-5.5 |\n| `gpt-5-6-mini` | GPT-5.6 Luna Mini |\n| `gpt-5-5-mini` | GPT-5.5 Mini |\n| `gpt-5-3-mini` | GPT-5.3 Mini (más rápido) |\n| `auto` | Selección automática del servidor |\n| `gpt-4o` | Alias → `auto` |\n| `gpt-4o-mini` | Alias → `gpt-5-3-mini` |\n| `gpt-4` | Alias → `gpt-5-5` |\n| `gpt-3.5-turbo` | Alias → `gpt-5-3-mini` |\n\n## Control de tools / búsqueda web\n\n### Campos directos (extensiones propias)\n| Campo | Tipo | Efecto |\n|-------|------|--------|\n| `web_search` | `boolean\\|null` | `true`=forzar búsqueda, `false`=desactivar, `null`=automático |\n| `force_use_tools` | `boolean\\|null` | `true`=activar tools avanzados del backend (reservas, shopping, widgets) |\n| `force_use_canvas` | `boolean\\|null` | `true`=activar modo Canvas — la respuesta incluye bloques `:::writing{...}` |\n\n### Campo `tools` (compatibilidad OpenAI — input only)\nEl array `tools` se acepta pero el backend **no devuelve `tool_calls`** — la respuesta es siempre texto (`choices[0].message.content`).\nLos nombres de función se mapean a flags internos:\n\n| Nombre de función | Efecto |\n|-------------------|--------|\n| `web_search`, `search`, `brave_search`, `bing_search`, `google_search` | `force_use_search = true` |\n| `chatgpt_tools`, `all_tools`, `builtin_tools` | `force_use_tools = true` |\n| Cualquier otro nombre | `force_use_tools = true` |\n| `tool_choice: \"none\"` | Desactiva ambos modos |\n\nLos campos directos (`web_search`, `force_use_tools`) tienen prioridad sobre el array `tools`.\n",
-    "version": "2.3.0"
+    "version": "2.4.0"
   },
   "servers": [
     {
+      "url": "http://localhost:8000",
+      "description": "Local instance"
+    },
+    {
       "url": "http://localhost:8888",
-      "description": "Local development"
+      "description": "Docker Compose instance"
     }
   ],
   "paths": {

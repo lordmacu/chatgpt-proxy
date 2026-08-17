@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔌</text></svg>" />
+</head>
+<body>
+<title>chatgpt-proxy</title>
+<style>
+  /* ── Tokens ──────────────────────────────────────────────────────────── */
+  :root {
+    --bg:           #F5F7FA;
+    --surface:      #FFFFFF;
+    --surface-2:    #EDF1F6;
+    --border:       #D4DCE8;
+    --border-subtle:#E4EBF3;
+    --text:         #0D1829;
+    --text-muted:   #5A6F85;
+    --text-faint:   #8FA2B5;
+    --accent:       #00B899;
+    --accent-dim:   #00B89918;
+    --code-bg:      #EDF1F6;
+    --code-border:  #00B899;
+    --bash-bg:      #101E2E;
+    --bash-text:    #C8DCED;
+    --bash-prompt:  #00C4A8;
+    --method-get:   #0BA360;
+    --method-get-bg:#E6F7F0;
+    --method-post:  #2563EB;
+    --method-post-bg:#EEF3FD;
+    --method-del:   #DC2626;
+    --method-del-bg:#FEF0F0;
+    --badge-bg:     #E4EBF3;
+    --badge-text:   #3B5268;
+    --shadow:       0 1px 3px rgba(0,0,0,0.07), 0 4px 16px rgba(0,0,0,0.05);
+    --radius:       6px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:           #07101E;
+      --surface:      #0D1A2C;
+      --surface-2:    #0A1524;
+      --border:       #1A2D44;
+      --border-subtle:#142135;
+      --text:         #D8E8F5;
+      --text-muted:   #7D9AB5;
+      --text-faint:   #4D6882;
+      --accent:       #00C9AA;
+      --accent-dim:   #00C9AA14;
+      --code-bg:      #091525;
+      --code-border:  #00C9AA;
+      --bash-bg:      #040E1A;
+      --bash-text:    #A8C4DC;
+      --bash-prompt:  #00D4B2;
+      --method-get:   #34D399;
+      --method-get-bg:#0A2519;
+      --method-post:  #60A5FA;
+      --method-post-bg:#0E1D38;
+      --method-del:   #F87171;
+      --method-del-bg:#2A0E0E;
+      --badge-bg:     #142135;
+      --badge-text:   #7D9AB5;
+      --shadow:       0 1px 4px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.25);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:           #07101E;
+    --surface:      #0D1A2C;
+    --surface-2:    #0A1524;
+    --border:       #1A2D44;
+    --border-subtle:#142135;
+    --text:         #D8E8F5;
+    --text-muted:   #7D9AB5;
+    --text-faint:   #4D6882;
+    --accent:       #00C9AA;
+    --accent-dim:   #00C9AA14;
+    --code-bg:      #091525;
+    --code-border:  #00C9AA;
+    --bash-bg:      #040E1A;
+    --bash-text:    #A8C4DC;
+    --bash-prompt:  #00D4B2;
+    --method-get:   #34D399;
+    --method-get-bg:#0A2519;
+    --method-post:  #60A5FA;
+    --method-post-bg:#0E1D38;
+    --method-del:   #F87171;
+    --method-del-bg:#2A0E0E;
+    --badge-bg:     #142135;
+    --badge-text:   #7D9AB5;
+    --shadow:       0 1px 4px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.25);
+  }
+
+  /* ── Reset & base ────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Layout ──────────────────────────────────────────────────────────── */
+  .layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: auto 1fr;
+    max-width: 1140px;
+    margin: 0 auto;
+    padding: 0 24px;
+    gap: 0 48px;
+  }
+
+  .site-header {
+    grid-column: 1 / -1;
+    padding: 40px 0 36px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar {
+    grid-column: 1;
+    padding-top: 36px;
+  }
+
+  .sidebar-inner {
+    position: sticky;
+    top: 24px;
+  }
+
+  .content {
+    grid-column: 2;
+    min-width: 0;
+    padding: 36px 0 80px;
+  }
+
+  @media (max-width: 780px) {
+    .layout { grid-template-columns: 1fr; padding: 0 16px; }
+    .site-header { grid-column: 1; }
+    .sidebar { display: none; }
+    .content { grid-column: 1; }
+  }
+
+  /* ── Header ──────────────────────────────────────────────────────────── */
+  .project-name {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .project-name .accent-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .project-tagline {
+    color: var(--text-muted);
+    font-size: 16px;
+    margin-bottom: 20px;
+    max-width: 580px;
+  }
+
+  .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--badge-bg);
+    color: var(--badge-text);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.01em;
+  }
+
+  .badge.accent { background: var(--accent-dim); color: var(--accent); }
+
+  /* ── ToC Sidebar ─────────────────────────────────────────────────────── */
+  .toc-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 12px;
+  }
+
+  .toc-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .toc-list a {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 3px 0;
+    transition: color 0.15s;
+    border-left: 2px solid transparent;
+    padding-left: 8px;
+  }
+
+  .toc-list a:hover { color: var(--accent); text-decoration: none; border-left-color: var(--accent); }
+
+  .toc-sub { padding-left: 16px; margin-top: 2px; }
+  .toc-sub a { font-size: 12px; }
+
+  /* ── Section headers ─────────────────────────────────────────────────── */
+  h2 {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-top: 52px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    scroll-margin-top: 24px;
+  }
+
+  h2::before {
+    content: '';
+    display: block;
+    width: 4px;
+    height: 20px;
+    border-radius: 2px;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  h3 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 32px;
+    margin-bottom: 12px;
+    scroll-margin-top: 24px;
+    text-wrap: balance;
+  }
+
+  h4 {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 24px;
+    margin-bottom: 8px;
+  }
+
+  /* ── Body text ───────────────────────────────────────────────────────── */
+  p { margin-bottom: 14px; line-height: 1.7; color: var(--text); }
+  p:last-child { margin-bottom: 0; }
+
+  ul, ol {
+    padding-left: 20px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  li { color: var(--text); line-height: 1.6; }
+
+  strong { font-weight: 600; color: var(--text); }
+
+  /* ── Inline code ─────────────────────────────────────────────────────── */
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    font-size: 0.85em;
+    background: var(--code-bg);
+    color: var(--text);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--border-subtle);
+  }
+
+  /* ── Code blocks ─────────────────────────────────────────────────────── */
+  .code-block {
+    position: relative;
+    margin: 16px 0;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+
+  .code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .code-body {
+    background: var(--code-bg);
+    padding: 16px 18px;
+    overflow-x: auto;
+    border-left: 3px solid var(--code-border);
+  }
+
+  .code-body pre {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+    margin: 0;
+    white-space: pre;
+  }
+
+  /* Bash/terminal style */
+  .code-block.bash .code-body {
+    background: var(--bash-bg);
+    border-left-color: var(--bash-prompt);
+  }
+
+  .code-block.bash pre { color: var(--bash-text); }
+  .code-block.bash .prompt { color: var(--bash-prompt); user-select: none; }
+  .code-block.bash .comment { color: #4D6882; font-style: italic; }
+  .code-block.bash .string { color: #7FD9A6; }
+  .code-block.bash .flag { color: #89B4FA; }
+
+  /* JSON style */
+  .code-block.json .code-body { background: var(--code-bg); }
+  .json-key    { color: #60A5FA; }
+  .json-str    { color: #4ADE80; }
+  .json-num    { color: #FB923C; }
+  .json-bool   { color: #A78BFA; }
+  .json-null   { color: #F87171; }
+
+  /* Python style */
+  .code-block.python .code-body { background: var(--code-bg); }
+  .py-kw   { color: #C084FC; }
+  .py-str  { color: #4ADE80; }
+  .py-fn   { color: #60A5FA; }
+  .py-cmt  { color: var(--text-faint); font-style: italic; }
+
+  /* ── Feature table ───────────────────────────────────────────────────── */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+
+  .feature-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .feature-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .feature-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 3px;
+  }
+
+  .feature-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  .unavailable { opacity: 0.5; }
+  .unavailable .feature-icon { filter: grayscale(1); }
+
+  /* ── Endpoint reference ──────────────────────────────────────────────── */
+  .endpoint {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 20px 0;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+
+  .endpoint-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+
+  .method {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .method.get    { color: var(--method-get);  background: var(--method-get-bg); }
+  .method.post   { color: var(--method-post); background: var(--method-post-bg); }
+  .method.delete { color: var(--method-del);  background: var(--method-del-bg); }
+
+  .endpoint-path {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .endpoint-desc {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .endpoint-body { padding: 18px; }
+  .endpoint-body p { font-size: 14px; margin-bottom: 12px; }
+
+  /* ── Request fields table ────────────────────────────────────────────── */
+  .field-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 14px 0;
+  }
+
+  .field-table th {
+    text-align: left;
+    padding: 7px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .field-table td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  .field-table tr:last-child td { border-bottom: none; }
+  .field-table tr:hover td { background: var(--accent-dim); }
+
+  .field-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .field-type {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .field-default {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .req-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--method-post-bg);
+    color: var(--method-post);
+    text-transform: uppercase;
+    margin-left: 4px;
+  }
+
+  /* ── Alert / callout ─────────────────────────────────────────────────── */
+  .callout {
+    display: flex;
+    gap: 12px;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin: 20px 0;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .callout-icon { flex-shrink: 0; font-size: 16px; }
+  .callout p:last-child { margin: 0; }
+
+  /* ── Divider ─────────────────────────────────────────────────────────── */
+  hr { border: none; border-top: 1px solid var(--border); margin: 48px 0 0; }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- GitHub Pages extra top bar -->
+  <style>
+    .gh-bar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      font-size: 13px;
+    }
+    .gh-bar a {
+      color: var(--text-muted);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: color 0.15s;
+    }
+    .gh-bar a:hover { color: var(--accent); }
+    .gh-bar .sep { color: var(--border); }
+    @media (max-width: 500px) { .gh-bar { flex-wrap: wrap; height: auto; padding: 8px 16px; } }
+  </style>
+  <div class="gh-bar">
+    <a href="https://github.com/lordmacu/chatgpt-proxy" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+      </svg>
+      GitHub
+    </a>
+    <span class="sep">|</span>
+    <a href="https://lordmacu.github.io/chatgpt-proxy/swagger/" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect width="16" height="16" rx="3" fill="#85EA2D"/><path d="M7.33 10.67c-.13.46-.36.83-.7 1.1-.33.27-.72.4-1.16.4-.4 0-.74-.1-1.03-.3a1.9 1.9 0 01-.66-.83 3.2 3.2 0 01-.23-1.23V9.5h1v.35c0 .42.08.76.24 1 .16.25.4.37.7.37.32 0 .56-.1.72-.32.16-.22.24-.53.24-.94V4h1v6.67zm2.48-3.04c.16.32.38.56.66.74.28.17.62.3 1 .39l.54.12c.3.07.5.16.62.28.12.12.18.27.18.45 0 .22-.09.4-.26.53-.17.13-.4.2-.7.2-.3 0-.54-.08-.72-.24-.18-.16-.3-.4-.34-.7H9.6c.04.52.22.94.56 1.24.34.3.8.45 1.38.45.38 0 .72-.07 1.02-.2.3-.13.54-.32.7-.56.17-.24.25-.52.25-.83 0-.27-.06-.51-.18-.72a1.5 1.5 0 00-.52-.52 3.2 3.2 0 00-.85-.34l-.54-.13c-.26-.06-.45-.14-.58-.24a.5.5 0 01-.19-.4c0-.2.08-.36.22-.48.15-.12.36-.18.63-.18.26 0 .46.07.62.21.16.14.26.34.3.6h1.4c-.05-.5-.23-.9-.55-1.18-.32-.28-.75-.42-1.3-.42-.36 0-.68.07-.97.2-.28.13-.5.32-.67.56-.16.24-.24.52-.24.83 0 .26.05.49.15.69z" fill="#000"/></svg>
+      API Reference (Swagger)
+    </a>
+    <span class="sep">|</span>
+    <a href="https://lordmacu.github.io/chatgpt-proxy/" target="_blank">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm.93 11.36c-.26.17-.55.25-.86.25-.44 0-.8-.15-1.08-.44-.28-.3-.42-.68-.42-1.15V7.2H6V6.05h.57V4.4l1.24-.17V6.05h1.1v1.15h-1.1v2.7c0 .22.05.38.14.49.1.11.24.16.42.16.18 0 .36-.05.53-.15l.03 1.96z"/></svg>
+      Docs
+    </a>
+  </div>
+
+<div class="layout">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="site-header">
+    <div class="project-name">
+      <span class="accent-dot"></span>
+      chatgpt-proxy
+    </div>
+    <p class="project-tagline">
+      OpenAI-compatible REST API backed by the ChatGPT Android anonymous flow.
+      No account required — drop-in replacement for <code>api.openai.com</code>.
+    </p>
+    <div class="badges">
+      <span class="badge accent">v2.4.0</span>
+      <a href="https://github.com/lordmacu/chatgpt-proxy" target="_blank" class="badge" style="text-decoration:none">GitHub ↗</a>
+      <span class="badge">Python 3.11+</span>
+      <span class="badge">FastAPI</span>
+      <span class="badge">anonymous · no auth</span>
+      <span class="badge">OpenAI-compatible</span>
+      <a href="https://lordmacu.github.io/chatgpt-proxy/swagger/" target="_blank" class="badge accent" style="text-decoration:none">📄 Swagger UI ↗</a>
+    </div>
+  </header>
+
+  <!-- ── Sidebar ToC ────────────────────────────────────────────────────── -->
+  <nav class="sidebar">
+    <div class="sidebar-inner">
+      <p class="toc-label">Contents</p>
+      <ul class="toc-list">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#requirements">Requirements</a></li>
+        <li><a href="#installation">Installation</a>
+          <ul class="toc-sub toc-list">
+            <li><a href="#install-local">Local (pip)</a></li>
+            <li><a href="#install-docker">Docker</a></li>
+            <li><a href="#install-compose">Docker Compose</a></li>
+          </ul>
+        </li>
+        <li><a href="#quickstart">Quick start</a></li>
+        <li><a href="#endpoints">Endpoints</a>
+          <ul class="toc-sub toc-list">
+            <li><a href="#ep-chat">POST /v1/chat/completions</a></li>
+            <li><a href="#ep-models">GET /v1/models</a></li>
+            <li><a href="#ep-files">POST /v1/files</a></li>
+            <li><a href="#ep-session">GET /v1/session/me</a></li>
+            <li><a href="#ep-health">GET /health</a></li>
+          </ul>
+        </li>
+        <li><a href="#request-fields">Request fields</a></li>
+        <li><a href="#streaming">Streaming SSE</a></li>
+        <li><a href="#json-mode">JSON mode</a></li>
+        <li><a href="#web-search">Web search</a></li>
+        <li><a href="#tools">Advanced tools</a></li>
+        <li><a href="#canvas">Canvas mode</a></li>
+        <li><a href="#files">File attachments</a></li>
+        <li><a href="#multi-turn">Multi-turn</a></li>
+        <li><a href="#multi-user">Multi-user / API keys</a></li>
+        <li><a href="#quota">Quota handling</a></li>
+        <li><a href="#sdk">OpenAI SDK</a></li>
+        <li><a href="#config">Configuration</a></li>
+        <li><a href="#limits">Known limits</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ── Main content ───────────────────────────────────────────────────── -->
+  <main class="content">
+
+    <!-- Features -->
+    <h2 id="features">Features</h2>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">No account needed</div>
+          <div class="feature-desc">Uses the anonymous Android flow — rotates device IDs automatically.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">OpenAI-compatible</div>
+          <div class="feature-desc">Same request/response shape as <code>api.openai.com/v1</code>. Works with existing SDKs.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Streaming</div>
+          <div class="feature-desc">Real-time SSE chunks, same format as OpenAI's streaming API.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">JSON mode</div>
+          <div class="feature-desc"><code>response_format: {type: "json_object"}</code> forces a valid JSON response.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Web search</div>
+          <div class="feature-desc">Automatic, or controlled with <code>web_search: true/false</code>.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">File attachments</div>
+          <div class="feature-desc">Upload PDF, code, or text files and reference them in messages.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Multi-turn conversations</div>
+          <div class="feature-desc">History is preserved per-session (30 min TTL).</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Multi-user</div>
+          <div class="feature-desc">Each Bearer token gets its own isolated session pool and file store.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Quota auto-recovery</div>
+          <div class="feature-desc">On 429/403 the session is recycled and the request is retried transparently.</div>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div>
+          <div class="feature-title">Advanced tools &amp; Canvas</div>
+          <div class="feature-desc">Reservations, shopping, interactive widgets, collaborative documents.</div>
+        </div>
+      </div>
+      <div class="feature-card unavailable">
+        <div class="feature-icon">❌</div>
+        <div>
+          <div class="feature-title">Image input</div>
+          <div class="feature-desc">Vision not available in anonymous mode.</div>
+        </div>
+      </div>
+      <div class="feature-card unavailable">
+        <div class="feature-icon">❌</div>
+        <div>
+          <div class="feature-title">Function calling</div>
+          <div class="feature-desc">The anonymous backend never returns <code>tool_calls</code>.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Requirements -->
+    <h2 id="requirements">Requirements</h2>
+    <ul>
+      <li>Python 3.11 or newer</li>
+      <li><code>fastapi</code>, <code>uvicorn[standard]</code>, <code>httpx</code>, <code>pydantic</code>, <code>python-multipart</code></li>
+      <li><code>pdfplumber</code> — optional, required only for PDF parsing</li>
+      <li>Network access to <code>android.chat.openai.com</code></li>
+    </ul>
+
+    <!-- Installation -->
+    <h2 id="installation">Installation</h2>
+
+    <h3 id="install-local">Local (pip + uvicorn)</h3>
+    <div class="code-block bash">
+      <div class="code-header">bash</div>
+      <div class="code-body"><pre><span class="comment"># Clone the repo</span>
+<span class="prompt">$ </span>git clone https://github.com/your-user/chatgpt-proxy.git
+<span class="prompt">$ </span>cd chatgpt-proxy
+
+<span class="comment"># Create and activate a virtual environment</span>
+<span class="prompt">$ </span>python3 -m venv .venv
+<span class="prompt">$ </span>source .venv/bin/activate   <span class="comment"># Windows: .venv\Scripts\activate</span>
+
+<span class="comment"># Install dependencies</span>
+<span class="prompt">$ </span>pip install -r requirements.txt
+
+<span class="comment"># Optional: PDF support</span>
+<span class="prompt">$ </span>pip install pdfplumber
+
+<span class="comment"># Run on port 8000</span>
+<span class="prompt">$ </span>uvicorn main:app --host 0.0.0.0 --port 8000</pre></div>
+    </div>
+
+    <h3 id="install-docker">Docker</h3>
+    <div class="code-block bash">
+      <div class="code-header">bash</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>docker build -t chatgpt-proxy .
+<span class="prompt">$ </span>docker run -d <span class="flag">-p 8000:8000</span> --name chatgpt-proxy chatgpt-proxy</pre></div>
+    </div>
+
+    <h3 id="install-compose">Docker Compose</h3>
+    <div class="code-block bash">
+      <div class="code-header">bash</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>docker compose up -d</pre></div>
+    </div>
+    <p>The service will be available at <code>http://localhost:8888</code> (mapped from container port 8000).</p>
+
+    <!-- Quick start -->
+    <h2 id="quickstart">Quick start</h2>
+    <p>Once the server is running, send a request using any OpenAI-compatible client:</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Hello! What can you do?"}]
+  }'</span></pre></div>
+    </div>
+
+    <div class="code-block json">
+      <div class="code-header">response</div>
+      <div class="code-body"><pre>{
+  <span class="json-key">"id"</span>: <span class="json-str">"chatcmpl-a4f2e1d0c3b2..."</span>,
+  <span class="json-key">"object"</span>: <span class="json-str">"chat.completion"</span>,
+  <span class="json-key">"model"</span>: <span class="json-str">"auto"</span>,
+  <span class="json-key">"choices"</span>: [{
+    <span class="json-key">"message"</span>: {
+      <span class="json-key">"role"</span>: <span class="json-str">"assistant"</span>,
+      <span class="json-key">"content"</span>: <span class="json-str">"Hi! I'm ChatGPT. I can help you with..."</span>
+    },
+    <span class="json-key">"finish_reason"</span>: <span class="json-str">"stop"</span>
+  }],
+  <span class="json-key">"usage"</span>: { <span class="json-key">"prompt_tokens"</span>: <span class="json-num">-1</span>, <span class="json-key">"completion_tokens"</span>: <span class="json-num">42</span>, <span class="json-key">"total_tokens"</span>: <span class="json-num">42</span> }
+}</pre></div>
+    </div>
+
+    <!-- Endpoints -->
+    <h2 id="endpoints">Endpoints</h2>
+
+    <div class="endpoint" id="ep-chat">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/v1/chat/completions</span>
+        <span class="endpoint-desc">Main chat endpoint</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Drop-in replacement for <code>POST api.openai.com/v1/chat/completions</code>. Accepts both
+        streaming and non-streaming requests. Supports system prompts, file attachments,
+        web search, JSON mode, and all other extensions documented below.</p>
+      </div>
+    </div>
+
+    <div class="endpoint" id="ep-models">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/v1/models</span>
+        <span class="endpoint-desc">Available models</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Returns the model list available in anonymous mode, plus legacy OpenAI aliases
+        (<code>gpt-4o</code>, <code>gpt-4</code>, <code>gpt-3.5-turbo</code>).
+        Results are cached for 5 minutes.</p>
+        <div class="code-block bash">
+          <div class="code-header">curl</div>
+          <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/models</pre></div>
+        </div>
+        <div class="code-block json">
+          <div class="code-header">response — available model slugs</div>
+          <div class="code-body"><pre><span class="json-str">"auto"</span>         <span class="comment">← default, picks best model</span>
+<span class="json-str">"gpt-5-6"</span>      <span class="comment">← GPT-5.6 (Luna)</span>
+<span class="json-str">"gpt-5-5"</span>      <span class="comment">← GPT-5.5</span>
+<span class="json-str">"gpt-5-6-mini"</span>
+<span class="json-str">"gpt-5-5-mini"</span>
+<span class="json-str">"gpt-5-3-mini"</span></pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="endpoint" id="ep-files">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/v1/files</span>
+        <span class="endpoint-desc">Upload a file</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Upload a text or PDF file. Returns a <code>file_id</code> that can be referenced
+        in subsequent chat messages. Files are stored in memory, isolated per API key,
+        and are cleared when the server restarts.</p>
+        <div class="code-block bash">
+          <div class="code-header">curl</div>
+          <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/files \
+  <span class="flag">-F</span> <span class="string">"file=@report.pdf;type=application/pdf"</span> \
+  <span class="flag">-F</span> <span class="string">"purpose=assistants"</span> \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer my-key"</span></pre></div>
+        </div>
+        <p>Also available: <code>GET /v1/files</code> (list), <code>GET /v1/files/{id}</code> (info), <code>DELETE /v1/files/{id}</code>.</p>
+      </div>
+    </div>
+
+    <div class="endpoint" id="ep-session">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/v1/session/me</span>
+        <span class="endpoint-desc">Anonymous session info</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Returns the anonymous user object from <code>/backend-anon/me</code>
+        — useful for debugging. Shows the current <code>device_id</code> and the
+        anonymous <code>ua-xxx</code> user identifier assigned by ChatGPT.</p>
+        <div class="code-block bash">
+          <div class="code-header">curl</div>
+          <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/session/me</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="endpoint" id="ep-health">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/health</span>
+        <span class="endpoint-desc">Server status</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Returns version, active session count, file count, and the full capabilities object.</p>
+        <div class="code-block bash">
+          <div class="code-header">curl</div>
+          <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/health</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Request fields -->
+    <h2 id="request-fields">Request fields</h2>
+    <p>All fields accepted by <code>POST /v1/chat/completions</code>:</p>
+
+    <div style="overflow-x:auto">
+    <table class="field-table">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Type</th>
+          <th>Default</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="field-name">model</span><span class="req-badge">req</span></td>
+          <td><span class="field-type">string</span></td>
+          <td><span class="field-default">"auto"</span></td>
+          <td>Model slug. Use <code>auto</code>, <code>gpt-5-5</code>, <code>gpt-5-6</code>, etc. Legacy aliases (<code>gpt-4o</code>, <code>gpt-4</code>) are accepted.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">messages</span><span class="req-badge">req</span></td>
+          <td><span class="field-type">array</span></td>
+          <td></td>
+          <td>Array of <code>{role, content}</code> objects. Roles: <code>system</code>, <code>user</code>, <code>assistant</code>.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">stream</span></td>
+          <td><span class="field-type">boolean</span></td>
+          <td><span class="field-default">false</span></td>
+          <td>Stream the response as SSE chunks.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">response_format</span></td>
+          <td><span class="field-type">object</span></td>
+          <td><span class="field-default">null</span></td>
+          <td><code>{"type": "json_object"}</code> to force a valid JSON response. See <a href="#json-mode">JSON mode</a>.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">web_search</span></td>
+          <td><span class="field-type">boolean</span></td>
+          <td><span class="field-default">null</span></td>
+          <td>Override web search. <code>true</code> = always search, <code>false</code> = never, <code>null</code> = model decides.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">force_use_tools</span></td>
+          <td><span class="field-type">boolean</span></td>
+          <td><span class="field-default">null</span></td>
+          <td>Enable advanced backend tools (reservations, shopping, genui widgets).</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">force_use_canvas</span></td>
+          <td><span class="field-type">boolean</span></td>
+          <td><span class="field-default">null</span></td>
+          <td>Enable Canvas / document mode. Response includes <code>:::writing{...}</code> blocks.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">tools</span></td>
+          <td><span class="field-type">array</span></td>
+          <td><span class="field-default">null</span></td>
+          <td>OpenAI tools array — accepted for compatibility. Function names are mapped to backend flags (<code>web_search</code> → search, anything else → tools).</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">tool_choice</span></td>
+          <td><span class="field-type">string</span></td>
+          <td><span class="field-default">null</span></td>
+          <td><code>"none"</code> disables all modes. <code>"auto"</code> / <code>"required"</code> enables them.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">temperature, max_tokens, top_p…</span></td>
+          <td><span class="field-type">various</span></td>
+          <td></td>
+          <td>Accepted for compatibility but ignored — the anonymous backend does not expose these controls.</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- Streaming -->
+    <h2 id="streaming">Streaming SSE</h2>
+    <p>Set <code>"stream": true</code> to receive response chunks as Server-Sent Events.
+    The format is identical to OpenAI's streaming API.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">--no-buffer</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Count to 5 slowly"}]
+  }'</span></pre></div>
+    </div>
+
+    <p>In addition to the standard content chunks, the proxy emits two extra SSE events
+    that are silently ignored by clients that don't recognise them:</p>
+
+    <div style="overflow-x:auto">
+    <table class="field-table">
+      <thead>
+        <tr><th>Event</th><th>When</th><th>Data</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="field-name">search_metadata</span></td>
+          <td>After web search was used</td>
+          <td><code>{queries: [...], sources: [...], title: "..."}</code></td>
+        </tr>
+        <tr>
+          <td><span class="field-name">widgets</span></td>
+          <td>When genui widgets are present</td>
+          <td><code>[{name: "...", data: {...}}]</code></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- JSON mode -->
+    <h2 id="json-mode">JSON mode</h2>
+    <p>Pass <code>"response_format": {"type": "json_object"}</code> to force the model to
+    respond with a valid JSON object. The proxy injects a system instruction and
+    also passes the parameter to the backend. Markdown code fences are automatically
+    stripped from the response.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "response_format": {"type": "json_object"},
+    "messages": [{
+      "role": "user",
+      "content": "Return a JSON object with the fields: name (string), age (number), city (string). Use fictional data."
+    }]
+  }'</span></pre></div>
+    </div>
+
+    <div class="code-block json">
+      <div class="code-header">response — choices[0].message.content</div>
+      <div class="code-body"><pre>{
+  <span class="json-key">"name"</span>: <span class="json-str">"Elena Marquez"</span>,
+  <span class="json-key">"age"</span>: <span class="json-num">29</span>,
+  <span class="json-key">"city"</span>: <span class="json-str">"Barcelona"</span>
+}</pre></div>
+    </div>
+
+    <!-- Web search -->
+    <h2 id="web-search">Web search</h2>
+    <p>The model uses web search automatically when it determines a query needs current
+    information. You can override this behaviour:</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl — force search on</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "web_search": true,
+    "messages": [{"role": "user", "content": "What happened in tech news today?"}]
+  }'</span></pre></div>
+    </div>
+
+    <p>When search is used, the non-streaming response includes a <code>search_metadata</code> object:</p>
+    <div class="code-block json">
+      <div class="code-header">extra field in non-streaming response</div>
+      <div class="code-body"><pre><span class="json-key">"search_metadata"</span>: {
+  <span class="json-key">"queries"</span>: [<span class="json-str">"tech news today August 2026"</span>],
+  <span class="json-key">"sources"</span>: [
+    { <span class="json-key">"url"</span>: <span class="json-str">"https://techcrunch.com/..."</span>, <span class="json-key">"title"</span>: <span class="json-str">"TechCrunch"</span>, <span class="json-key">"attribution"</span>: <span class="json-str">"TechCrunch"</span> }
+  ],
+  <span class="json-key">"title"</span>: <span class="json-str">"Tech news — August 16, 2026"</span>
+}</pre></div>
+    </div>
+
+    <p>You can also control search via the standard OpenAI <code>tools</code> array:</p>
+    <div class="code-block json">
+      <div class="code-header">OpenAI tools format → web search</div>
+      <div class="code-body"><pre>{
+  <span class="json-key">"model"</span>: <span class="json-str">"auto"</span>,
+  <span class="json-key">"tools"</span>: [{ <span class="json-key">"type"</span>: <span class="json-str">"function"</span>, <span class="json-key">"function"</span>: { <span class="json-key">"name"</span>: <span class="json-str">"web_search"</span> } }],
+  <span class="json-key">"messages"</span>: [{ <span class="json-key">"role"</span>: <span class="json-str">"user"</span>, <span class="json-key">"content"</span>: <span class="json-str">"Latest news"</span> }]
+}</pre></div>
+    </div>
+
+    <!-- Advanced tools -->
+    <h2 id="tools">Advanced tools</h2>
+    <p>Setting <code>"force_use_tools": true</code> enables ChatGPT's full tool suite:
+    real-time reservations, shopping results, interactive widgets (genui), and more.
+    Results are returned as text with an optional <code>widgets</code> field.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "force_use_tools": true,
+    "messages": [{"role": "user", "content": "Find me a hotel in Paris for this weekend"}]
+  }'</span></pre></div>
+    </div>
+
+    <!-- Canvas mode -->
+    <h2 id="canvas">Canvas mode</h2>
+    <p>Canvas enables collaborative document editing. The response text includes
+    special <code>:::writing{...}</code> blocks that contain the document structure.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "force_use_canvas": true,
+    "messages": [{"role": "user", "content": "Write a product requirements document for a task manager app"}]
+  }'</span></pre></div>
+    </div>
+
+    <!-- File attachments -->
+    <h2 id="files">File attachments</h2>
+    <p>Upload a file first, then reference its <code>file_id</code> in a message
+    using the multipart content format.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">step 1 — upload</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/files \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer my-key"</span> \
+  <span class="flag">-F</span> <span class="string">"file=@contract.pdf;type=application/pdf"</span>
+<span class="comment"># → {"id": "file-a3b4c5d6e7f8...", "status": "processed", ...}</span></pre></div>
+    </div>
+
+    <div class="code-block bash">
+      <div class="code-header">step 2 — use in message</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer my-key"</span> \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "file", "file": {"file_id": "file-a3b4c5d6e7f8..."}},
+        {"type": "text", "text": "Summarise the key obligations in this contract."}
+      ]
+    }]
+  }'</span></pre></div>
+    </div>
+
+    <!-- Multi-turn -->
+    <h2 id="multi-turn">Multi-turn conversations</h2>
+    <p>The proxy detects continuations by hashing the message history. Send the full
+    conversation on each request — the proxy reuses the underlying session automatically.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">turn 1</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-d</span> <span class="string">'{"model":"auto","messages":[{"role":"user","content":"My name is Ana."}]}'</span> \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span>
+<span class="comment"># → "Hello Ana! How can I help you?"</span></pre></div>
+    </div>
+
+    <div class="code-block bash">
+      <div class="code-header">turn 2 — include full history</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-d</span> <span class="string">'{
+    "model": "auto",
+    "messages": [
+      {"role": "user",      "content": "My name is Ana."},
+      {"role": "assistant", "content": "Hello Ana! How can I help you?"},
+      {"role": "user",      "content": "What is my name?"}
+    ]
+  }'</span> <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span>
+<span class="comment"># → "Your name is Ana."</span></pre></div>
+    </div>
+
+    <!-- Multi-user -->
+    <h2 id="multi-user">Multi-user / API keys</h2>
+    <p>Each <code>Authorization: Bearer &lt;token&gt;</code> value gets a completely
+    isolated namespace: its own session pool, its own file store, and its own quota
+    tracking. Users without a header all share the <code>anonymous</code> namespace.</p>
+
+    <div class="code-block bash">
+      <div class="code-header">curl</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>curl http://localhost:8000/v1/chat/completions \
+  <span class="flag">-H</span> <span class="string">"Authorization: Bearer user-alice"</span> \
+  <span class="flag">-H</span> <span class="string">"Content-Type: application/json"</span> \
+  <span class="flag">-d</span> <span class="string">'{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'</span></pre></div>
+    </div>
+
+    <!-- Quota -->
+    <h2 id="quota">Quota handling</h2>
+    <p>The anonymous flow assigns a message quota to each <code>device_id</code> (a UUID
+    generated per session). When the quota is exhausted the backend returns HTTP 429 or 403.</p>
+
+    <div class="callout">
+      <div class="callout-icon">♻️</div>
+      <div>
+        <strong>Automatic recovery:</strong> when a session hits its limit the proxy marks
+        it as exhausted, creates a fresh session with a new <code>device_id</code>, and
+        retries the current request transparently. The client receives the normal response
+        without any interruption. If the second attempt also fails (IP-level limit),
+        the proxy returns HTTP <code>429</code> with an OpenAI-formatted error.
+      </div>
+    </div>
+
+    <div class="code-block json">
+      <div class="code-header">error response when fully exhausted</div>
+      <div class="code-body"><pre>{
+  <span class="json-key">"error"</span>: {
+    <span class="json-key">"message"</span>: <span class="json-str">"Anonymous message limit exhausted. A new device_id will be used on the next request."</span>,
+    <span class="json-key">"type"</span>:    <span class="json-str">"rate_limit_exceeded"</span>,
+    <span class="json-key">"code"</span>:    <span class="json-str">"rate_limit_exceeded"</span>
+  }
+}</pre></div>
+    </div>
+
+    <!-- OpenAI SDK -->
+    <h2 id="sdk">OpenAI SDK compatibility</h2>
+    <p>Point any OpenAI-compatible client at the proxy by changing the base URL:</p>
+
+    <div class="code-block python">
+      <div class="code-header">Python — openai SDK</div>
+      <div class="code-body"><pre><span class="py-kw">from</span> openai <span class="py-kw">import</span> OpenAI
+
+client = <span class="py-fn">OpenAI</span>(
+    base_url=<span class="py-str">"http://localhost:8000/v1"</span>,
+    api_key=<span class="py-str">"any-string"</span>,  <span class="py-cmt"># required by the SDK but not validated</span>
+)
+
+response = client.chat.completions.<span class="py-fn">create</span>(
+    model=<span class="py-str">"auto"</span>,
+    messages=[{<span class="py-str">"role"</span>: <span class="py-str">"user"</span>, <span class="py-str">"content"</span>: <span class="py-str">"Hello!"</span>}],
+)
+<span class="py-fn">print</span>(response.choices[<span class="json-num">0</span>].message.content)</pre></div>
+    </div>
+
+    <div class="code-block python">
+      <div class="code-header">Python — streaming</div>
+      <div class="code-body"><pre><span class="py-kw">with</span> client.chat.completions.<span class="py-fn">stream</span>(
+    model=<span class="py-str">"auto"</span>,
+    messages=[{<span class="py-str">"role"</span>: <span class="py-str">"user"</span>, <span class="py-str">"content"</span>: <span class="py-str">"Write a haiku about rain"</span>}],
+) <span class="py-kw">as</span> stream:
+    <span class="py-kw">for</span> chunk <span class="py-kw">in</span> stream:
+        <span class="py-kw">if</span> chunk.choices[<span class="json-num">0</span>].delta.content:
+            <span class="py-fn">print</span>(chunk.choices[<span class="json-num">0</span>].delta.content, end=<span class="py-str">""</span>, flush=<span class="json-bool">True</span>)</pre></div>
+    </div>
+
+    <div class="code-block python">
+      <div class="code-header">Python — JSON mode</div>
+      <div class="code-body"><pre><span class="py-kw">import</span> json
+
+response = client.chat.completions.<span class="py-fn">create</span>(
+    model=<span class="py-str">"auto"</span>,
+    response_format={<span class="py-str">"type"</span>: <span class="py-str">"json_object"</span>},
+    messages=[{
+        <span class="py-str">"role"</span>: <span class="py-str">"user"</span>,
+        <span class="py-str">"content"</span>: <span class="py-str">"Return a JSON object with keys: status and timestamp."</span>
+    }],
+)
+data = json.<span class="py-fn">loads</span>(response.choices[<span class="json-num">0</span>].message.content)
+<span class="py-fn">print</span>(data)</pre></div>
+    </div>
+
+    <!-- Config -->
+    <h2 id="config">Configuration</h2>
+    <div style="overflow-x:auto">
+    <table class="field-table">
+      <thead>
+        <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="field-name">DEBUG</span></td>
+          <td><span class="field-default">""</span></td>
+          <td>Set to <code>1</code>, <code>true</code>, or <code>yes</code> to log SSE frames, HTTP statuses, and session events to stderr.</td>
+        </tr>
+        <tr>
+          <td><span class="field-name">PORT</span></td>
+          <td><span class="field-default">8000</span></td>
+          <td>Uvicorn port (set in the <code>uvicorn</code> command or in <code>docker-compose.yml</code>).</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="code-block bash">
+      <div class="code-header">run with debug logging</div>
+      <div class="code-body"><pre><span class="prompt">$ </span>DEBUG=1 uvicorn main:app --host 0.0.0.0 --port 8000</pre></div>
+    </div>
+
+    <!-- Known limits -->
+    <h2 id="limits">Known limits</h2>
+    <ul>
+      <li><strong>No image input.</strong> The anonymous flow does not support vision. Uploading images returns HTTP 415.</li>
+      <li><strong>No function calling.</strong> The backend never returns <code>tool_calls</code> — responses are always plain text.</li>
+      <li><strong>No image generation.</strong> DALL·E requires an authenticated account.</li>
+      <li><strong>File storage is in-memory.</strong> Uploaded files are lost on server restart.</li>
+      <li><strong>IP-level quota.</strong> If many sessions share the same IP, the transparent device_id rotation may still hit an IP-level limit. The proxy surfaces this as HTTP 429.</li>
+      <li><strong>Streaming JSON mode.</strong> Streamed chunks in JSON mode may include the JSON object split across multiple chunks; concatenate them before parsing.</li>
+      <li><strong>Session TTL is 30 minutes.</strong> Idle sessions are evicted. Sending a message to an evicted session creates a new one automatically.</li>
+    </ul>
+
+    <hr>
+    <p style="color:var(--text-faint); font-size:12px; padding-top:24px;">
+      chatgpt-proxy v2.4.0 &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; FastAPI &nbsp;·&nbsp; MIT
+    </p>
+
+  </main>
+</div>
+
+</body>
+</html>

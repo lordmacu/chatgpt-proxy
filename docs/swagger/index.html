@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>chatgpt-proxy — API Reference</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <style>
+    :root { --accent: #00B899; }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #07101E;
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    }
+
+    .top-bar {
+      background: #0D1A2C;
+      border-bottom: 1px solid #1A2D44;
+      padding: 0 24px;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .top-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .top-bar-name {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 15px;
+      font-weight: 700;
+      color: #D8E8F5;
+      letter-spacing: -0.02em;
+    }
+
+    .top-bar-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(0,200,160,0.12);
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-family: monospace;
+    }
+
+    .top-bar-right a {
+      color: #7D9AB5;
+      text-decoration: none;
+      font-size: 13px;
+      margin-left: 20px;
+      transition: color 0.15s;
+    }
+    .top-bar-right a:hover { color: var(--accent); }
+
+    #swagger-ui {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px 80px;
+    }
+
+    /* ── Swagger UI overrides ── */
+    .swagger-ui .topbar { display: none; }
+
+    .swagger-ui .info { margin-bottom: 24px; }
+    .swagger-ui .info .title { color: #D8E8F5; font-size: 22px; }
+    .swagger-ui .info .description p { color: #7D9AB5; }
+    .swagger-ui .info a { color: var(--accent); }
+
+    .swagger-ui .scheme-container {
+      background: #0D1A2C;
+      border: 1px solid #1A2D44;
+      border-radius: 6px;
+      padding: 10px 16px;
+    }
+
+    .swagger-ui .opblock-tag {
+      color: #D8E8F5 !important;
+      border-bottom: 1px solid #1A2D44 !important;
+      font-size: 15px !important;
+    }
+
+    .swagger-ui .opblock {
+      background: #0D1A2C !important;
+      border: 1px solid #1A2D44 !important;
+      border-radius: 6px !important;
+      margin-bottom: 8px !important;
+    }
+
+    .swagger-ui .opblock .opblock-summary-method {
+      border-radius: 4px !important;
+      font-family: monospace !important;
+    }
+
+    .swagger-ui .opblock-summary-path {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 14px !important;
+    }
+
+    .swagger-ui .opblock-body { background: #091525 !important; }
+
+    .swagger-ui textarea, .swagger-ui input[type=text] {
+      background: #091525 !important;
+      color: #D8E8F5 !important;
+      border: 1px solid #1A2D44 !important;
+    }
+
+    .swagger-ui .btn.execute {
+      background: var(--accent) !important;
+      border-color: var(--accent) !important;
+      color: #fff !important;
+    }
+
+    .swagger-ui .response-col_status { color: var(--accent) !important; }
+
+    .swagger-ui section.models { background: #0D1A2C !important; border: 1px solid #1A2D44 !important; border-radius: 6px; }
+    .swagger-ui .model-title { color: #D8E8F5 !important; }
+
+    .swagger-ui .markdown p, .swagger-ui .markdown li { color: #7D9AB5; }
+    .swagger-ui .parameter__name { color: #60A5FA !important; }
+    .swagger-ui .parameter__type { color: var(--accent) !important; }
+
+    .swagger-ui table tbody tr td { color: #D8E8F5; }
+    .swagger-ui .response-col_description__inner p { color: #7D9AB5; }
+  </style>
+</head>
+<body>
+
+  <div class="top-bar">
+    <div class="top-bar-left">
+      <div class="dot"></div>
+      <span class="top-bar-name">chatgpt-proxy</span>
+      <span class="top-bar-badge">v2.4.0</span>
+    </div>
+    <div class="top-bar-right">
+      <a href="../">Docs</a>
+      <a href="https://github.com/lordmacu/chatgpt-proxy">GitHub ↗</a>
+    </div>
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = () => {
+      SwaggerUIBundle({
+        url:            "./openapi.json",
+        dom_id:         "#swagger-ui",
+        presets:        [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout:         "StandaloneLayout",
+        deepLinking:    true,
+        tryItOutEnabled: true,
+        requestInterceptor: (req) => {
+          // Default server for Try It Out
+          return req;
+        },
+      });
+    };
+  </script>
+</body>
+</html>
