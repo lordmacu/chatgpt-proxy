@@ -64,14 +64,14 @@ c = C(enabled=not _NO_COLOR)
 # ── Spinner ───────────────────────────────────────────────────────────────────
 
 class Spinner:
-    """Thread-based spinner that writes to stderr, leaving stdout clean."""
+    """Thread-based spinner on stdout — same stream as the response, no race condition."""
     _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, message: str = "Thinking"):
-        self._msg   = message
-        self._stop  = threading.Event()
+        self._msg    = message
+        self._stop   = threading.Event()
         self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._width = len(message) + 6  # frame + spaces + "..."
+        self._width  = len(message) + 6
 
     def start(self) -> "Spinner":
         if not _NO_COLOR:
@@ -81,18 +81,19 @@ class Spinner:
     def stop(self):
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=0.3)
+            self._thread.join(timeout=0.5)
         if not _NO_COLOR:
-            sys.stderr.write("\r" + " " * self._width + "\r")
-            sys.stderr.flush()
+            # Clear on stdout — same stream as the response text, guaranteed order
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
 
     def _spin(self):
         frames = self._FRAMES
         i = 0
         while not self._stop.is_set():
             frame = frames[i % len(frames)]
-            sys.stderr.write(f"\r{c.DIM}{frame} {self._msg}...{c.RESET}")
-            sys.stderr.flush()
+            sys.stdout.write(f"\r{c.DIM}{frame} {self._msg}...{c.RESET}")
+            sys.stdout.flush()
             self._stop.wait(0.08)
             i += 1
 
