@@ -344,23 +344,41 @@ textarea::placeholder{color:var(--muted)}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 
-/* ── mobile ── */
-.btn-settings{display:none;background:transparent;border:1px solid var(--border);
-  color:var(--muted);border-radius:6px;padding:5px 9px;font-size:15px;cursor:pointer;line-height:1}
-.btn-settings:active{color:var(--accent);border-color:var(--accent)}
-.settings.collapsed{display:none}
+/* ── hamburger ── */
+.btn-hamburger{display:none;background:transparent;border:none;color:var(--text);
+  font-size:20px;cursor:pointer;padding:4px 6px;line-height:1;flex-shrink:0}
+
+/* mobile settings panel */
+.settings-panel{display:none;position:absolute;top:var(--header-h,49px);left:0;right:0;
+  background:var(--surface2);border-bottom:1px solid var(--border);
+  flex-direction:column;gap:14px;padding:14px 16px;z-index:50;
+  animation:slideDown .18s ease}
+.settings-panel.open{display:flex}
+@keyframes slideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.settings-panel .row{display:flex;gap:18px;flex-wrap:wrap}
+.settings-panel label{font-size:13px;color:var(--text);cursor:pointer;
+  display:flex;align-items:center;gap:7px;user-select:none}
+.settings-panel input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}
+.settings-panel select{background:var(--surface);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer;outline:none}
+.settings-panel .model-row{display:flex;align-items:center;gap:8px}
+.settings-panel .model-row span{font-size:13px;color:var(--muted)}
+.settings-panel .sys-row{display:flex;align-items:center;gap:8px}
+.settings-panel .sys-row span{font-size:13px;color:var(--muted);white-space:nowrap}
+.settings-panel .sys-row input{flex:1;background:var(--surface);color:var(--text);
+  border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:13px;outline:none}
+.settings-panel .sys-row input:focus{border-color:var(--accent)}
+.settings-panel .sys-row input::placeholder{color:var(--muted)}
 
 @media(max-width:640px){
   body{height:100svh;height:100dvh}
-  header{padding:8px 14px;gap:8px}
+  header{padding:8px 12px;gap:8px;position:relative}
+  .btn-hamburger{display:block}
   .logo-name{font-size:14px}
   .logo-badge{display:none}
   .status-pill{display:none}
   .github-link span{display:none}
-  .btn-settings{display:inline-flex;align-items:center}
-  .settings{padding:8px 14px;gap:10px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
-  .settings::-webkit-scrollbar{height:0}
-  .sys-wrap{min-width:150px}
+  .settings{display:none}
   .msgs{padding:12px 10px;gap:10px}
   .msg.user{max-width:88%}
   .bubble{font-size:13px;padding:9px 12px}
@@ -378,6 +396,7 @@ textarea::placeholder{color:var(--muted)}
 </head>
 <body>
 <header>
+  <button class="btn-hamburger" id="btn-hamburger" aria-label="Menu">☰</button>
   <div class="logo">
     <div class="logo-dot"></div>
     <span class="logo-name">chatgpt-proxy</span>
@@ -400,9 +419,26 @@ textarea::placeholder{color:var(--muted)}
       </svg>
       <span>GitHub</span>
     </a>
-    <button class="btn-settings" id="btn-settings" title="Settings">⚙</button>
   </div>
 </header>
+
+<!-- Mobile settings panel (hamburger menu) -->
+<div class="settings-panel" id="settings-panel">
+  <div class="model-row">
+    <span>Model</span>
+    <select id="sel-model-m"><option value="auto">auto</option></select>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="chk-search-m"> Web Search</label>
+    <label><input type="checkbox" id="chk-tools-m"> Adv. Tools</label>
+    <label><input type="checkbox" id="chk-canvas-m"> Canvas</label>
+    <label><input type="checkbox" id="chk-json-m"> JSON mode</label>
+  </div>
+  <div class="sys-row">
+    <span>System</span>
+    <input type="text" id="inp-system-m" placeholder="System prompt (optional)…">
+  </div>
+</div>
 
 <div class="settings">
   <div style="display:flex;align-items:center;gap:8px">
@@ -676,16 +712,73 @@ inp.addEventListener('keydown', e => {
 btnSend.onclick = send;
 inp.focus();
 
-// ── Settings toggle (mobile) ──────────────────────────────────────────────────
-const btnSettings = document.getElementById('btn-settings');
-const settingsBar = document.querySelector('.settings');
-if (btnSettings) {
-  // Start collapsed on mobile
-  if (window.innerWidth <= 640) settingsBar.classList.add('collapsed');
-  btnSettings.addEventListener('click', () => {
-    settingsBar.classList.toggle('collapsed');
-    btnSettings.style.color = settingsBar.classList.contains('collapsed') ? '' : 'var(--accent)';
-    btnSettings.style.borderColor = settingsBar.classList.contains('collapsed') ? '' : 'var(--accent)';
+// ── Hamburger menu (mobile) ───────────────────────────────────────────────────
+const btnHamburger = document.getElementById('btn-hamburger');
+const settingsPanel = document.getElementById('settings-panel');
+
+// Sync mobile ↔ desktop controls
+function isMobile() { return window.innerWidth <= 640; }
+
+function getCtrl(id) {
+  return document.getElementById(isMobile() ? id + '-m' : id) ||
+         document.getElementById(id);
+}
+
+// Override the getters used in send() to prefer mobile controls when open
+const _origSend = send;
+function getChecked(id) {
+  const mob = document.getElementById(id + '-m');
+  const desk = document.getElementById(id);
+  return (mob && settingsPanel.classList.contains('open')) ? mob.checked : (desk ? desk.checked : false);
+}
+
+// Populate mobile model selector from desktop one (after fetch)
+const desktopModel = document.getElementById('sel-model');
+const mobileModel  = document.getElementById('sel-model-m');
+const _origFetch = window.fetch;
+new MutationObserver(() => {
+  if (mobileModel && desktopModel.options.length > 1) {
+    mobileModel.innerHTML = desktopModel.innerHTML;
+  }
+}).observe(desktopModel, {childList: true});
+
+// Sync model selection between panels
+desktopModel.addEventListener('change', () => { if (mobileModel) mobileModel.value = desktopModel.value; });
+if (mobileModel) mobileModel.addEventListener('change', () => { desktopModel.value = mobileModel.value; });
+
+// Sync checkboxes desktop ↔ mobile
+['chk-search','chk-tools','chk-canvas','chk-json'].forEach(id => {
+  const d = document.getElementById(id), m = document.getElementById(id + '-m');
+  if (d && m) {
+    d.addEventListener('change', () => m.checked = d.checked);
+    m.addEventListener('change', () => d.checked = m.checked);
+  }
+});
+
+// Sync system prompt
+const dSys = document.getElementById('inp-system'), mSys = document.getElementById('inp-system-m');
+if (dSys && mSys) {
+  dSys.addEventListener('input', () => mSys.value = dSys.value);
+  mSys.addEventListener('input', () => dSys.value = mSys.value);
+}
+
+// Toggle panel
+if (btnHamburger && settingsPanel) {
+  btnHamburger.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = settingsPanel.classList.toggle('open');
+    btnHamburger.style.color = open ? 'var(--accent)' : '';
+    // sync mobile model list on first open
+    if (open && mobileModel && desktopModel.options.length > 1) {
+      mobileModel.innerHTML = desktopModel.innerHTML;
+      mobileModel.value = desktopModel.value;
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!settingsPanel.contains(e.target) && e.target !== btnHamburger) {
+      settingsPanel.classList.remove('open');
+      btnHamburger.style.color = '';
+    }
   });
 }
 </script>
