@@ -635,7 +635,7 @@ async function send() {
     const dec    = new TextDecoder();
     let buf = '';
 
-    while (true) {
+    stream: while (true) {
       const {done, value} = await reader.read();
       if (done) break;
       buf += dec.decode(value, {stream: true});
@@ -644,7 +644,7 @@ async function send() {
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         const raw = line.slice(5).trim();
-        if (raw === '[DONE]') break;
+        if (raw === '[DONE]') break stream;
         try {
           const obj = JSON.parse(raw);
           if (obj.error) throw new Error(obj.error.message);
