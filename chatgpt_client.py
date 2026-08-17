@@ -453,6 +453,14 @@ class ChatGPTSession:
                     if evt.get("message_id"):
                         last_assistant_msg_id = evt["message_id"]
                     _log(f"control event type={etype}")
+                    if etype == "message_stream_complete":
+                        # Text is fully streamed. ChatGPT still sends metadata and
+                        # [DONE] 5-10s later — close the connection now instead of waiting.
+                        try:
+                            await resp.aclose()
+                        except Exception:
+                            pass
+                        break
                     event_type = None
                     continue
 
