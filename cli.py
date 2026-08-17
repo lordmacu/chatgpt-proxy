@@ -576,31 +576,48 @@ examples:
         if not args.quiet:
             pass  # spinner handles the "waiting" state
 
+        ask_kwargs = dict(
+            model      = args.model,
+            file_texts = file_texts,
+            stream     = stream,
+            json_mode  = args.json,
+            search     = search,
+            tools      = True if args.tools else None,
+            canvas     = True if args.canvas else None,
+            quiet      = args.quiet,
+        )
+
         session = ChatGPTSession(system_prompt=args.system)
-        try:
-            await ask(
-                session,
-                args.message,
-                model      = args.model,
-                file_texts = file_texts,
-                stream     = stream,
-                json_mode  = args.json,
-                search     = search,
-                tools      = True if args.tools else None,
-                canvas     = True if args.canvas else None,
-                quiet      = args.quiet,
-            )
-        except QuotaExceededError as e:
-            err(f"Quota exhausted: {e}")
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                await ask(session, args.message, **ask_kwargs)
+                last_exc = None
+                break
+            except QuotaExceededError as e:
+                err(f"Quota exhausted: {e}")
+                sys.exit(1)
+            except KeyboardInterrupt:
+                print()
+                sys.exit(0)
+            except Exception as e:
+                last_exc = e
+                if attempt == 0:
+                    if not args.quiet:
+                        print(
+                            f"{c.YELLOW}Retrying with a fresh session…{c.RESET}",
+                            file=sys.stderr,
+                        )
+                    await session.close()
+                    session = ChatGPTSession(system_prompt=args.system)
+                    await asyncio.sleep(1)
+
+        if last_exc is not None:
+            err(f"{type(last_exc).__name__}: {last_exc}" if str(last_exc)
+                else type(last_exc).__name__)
             sys.exit(1)
-        except KeyboardInterrupt:
-            print()
-            sys.exit(0)
-        except Exception as e:
-            err(str(e))
-            sys.exit(1)
-        finally:
-            await session.close()
+
+        await session.close()
 
 
 if __name__ == "__main__":
