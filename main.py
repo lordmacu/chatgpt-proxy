@@ -37,6 +37,7 @@ OpenAI `tools` field compatibility (input-only):
   The response is always text in choices[0].message.content, never tool_calls.
 """
 import io
+import os
 import uuid
 import json
 import time
@@ -212,10 +213,30 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
+# Optional API token guard (set API_TOKEN env var to enable)
+# When enabled, all /v1/* requests must include: X-API-Token: <token>
+# The web UI automatically receives the token and includes it in every request.
+# ---------------------------------------------------------------------------
+_API_TOKEN = os.getenv("API_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def _token_guard(request: Request, call_next):
+    if _API_TOKEN and request.url.path.startswith("/v1/"):
+        token = request.headers.get("X-API-Token", "")
+        if token != _API_TOKEN:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "Unauthorized: missing or invalid X-API-Token", "type": "auth_error"}},
+            )
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Web UI — served at GET /
 # ---------------------------------------------------------------------------
 
-_CHAT_HTML = r"""<!DOCTYPE html>
+_CHAT_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -383,9 +404,11 @@ const selModel = document.getElementById('sel-model');
 
 let history = [];
 let abort   = null;
+const API_TOKEN = "__API_TOKEN__";
+const _apiHeaders = h => API_TOKEN ? {...h, 'X-API-Token': API_TOKEN} : h;
 
 // ── Load models ───────────────────────────────────────────────────────────────
-fetch('/v1/models').then(r => r.json()).then(data => {
+fetch('/v1/models', {headers: _apiHeaders({})}).then(r => r.json()).then(data => {
   const ids = (data.data || []).map(m => m.id).filter(Boolean);
   if (!ids.length) return;
   selModel.innerHTML = '';
@@ -505,7 +528,7 @@ async function send() {
   try {
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: _apiHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({
         model, messages, stream: true,
         web_search:       search,
@@ -608,10 +631,14 @@ inp.focus();
 </html>"""
 
 
+def _render_chat_html() -> str:
+    return _CHAT_HTML.replace("__API_TOKEN__", _API_TOKEN)
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def chat_ui():
     """Serve the built-in web chat interface."""
-    return HTMLResponse(content=_CHAT_HTML)
+    return HTMLResponse(content=_render_chat_html())
 
 
 # ---------------------------------------------------------------------------
