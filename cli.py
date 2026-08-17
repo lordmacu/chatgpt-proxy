@@ -68,10 +68,11 @@ class Spinner:
     _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, message: str = "Thinking"):
-        self._msg    = message
-        self._stop   = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._width  = len(message) + 6
+        self._msg     = message
+        self._stop    = threading.Event()
+        self._thread  = threading.Thread(target=self._spin, daemon=True)
+        self._width   = len(message) + 6
+        self._cleared = False
 
     def start(self) -> "Spinner":
         if not _NO_COLOR:
@@ -82,8 +83,8 @@ class Spinner:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=0.5)
-        if not _NO_COLOR:
-            # Clear on stdout — same stream as the response text, guaranteed order
+        if not _NO_COLOR and not self._cleared:
+            self._cleared = True
             sys.stdout.write("\r\033[2K")
             sys.stdout.flush()
 
