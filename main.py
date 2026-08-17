@@ -343,6 +343,37 @@ textarea::placeholder{color:var(--muted)}
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* ── mobile ── */
+.btn-settings{display:none;background:transparent;border:1px solid var(--border);
+  color:var(--muted);border-radius:6px;padding:5px 9px;font-size:15px;cursor:pointer;line-height:1}
+.btn-settings:active{color:var(--accent);border-color:var(--accent)}
+.settings.collapsed{display:none}
+
+@media(max-width:640px){
+  body{height:100svh;height:100dvh}
+  header{padding:8px 14px;gap:8px}
+  .logo-name{font-size:14px}
+  .logo-badge{display:none}
+  .status-pill{display:none}
+  .github-link span{display:none}
+  .btn-settings{display:inline-flex;align-items:center}
+  .settings{padding:8px 14px;gap:10px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .settings::-webkit-scrollbar{height:0}
+  .sys-wrap{min-width:150px}
+  .msgs{padding:12px 10px;gap:10px}
+  .msg.user{max-width:88%}
+  .bubble{font-size:13px;padding:9px 12px}
+  .input-area{padding:10px 12px}
+  .input-row{gap:7px}
+  .btn-clear{padding:10px 10px;font-size:12px}
+  .btn-send{padding:10px 13px;font-size:13px}
+  .footer-info{font-size:10px}
+  .empty-icon{font-size:36px}
+  .empty-title{font-size:18px}
+  .chips{gap:6px}
+  .chip{font-size:12px;padding:5px 11px}
+}
 </style>
 </head>
 <body>
@@ -352,9 +383,9 @@ textarea::placeholder{color:var(--muted)}
     <span class="logo-name">chatgpt-proxy</span>
     <span class="logo-badge">Free</span>
   </div>
-  <div style="display:flex;align-items:center;gap:12px">
+  <div style="display:flex;align-items:center;gap:10px">
     <span class="status-pill" id="hdr-status">🟢 Anonymous · No account needed</span>
-    <a href="https://github.com/lordmacu/chatgpt-proxy" target="_blank" rel="noopener"
+    <a href="https://github.com/lordmacu/chatgpt-proxy" target="_blank" rel="noopener" class="github-link"
        style="display:flex;align-items:center;gap:5px;color:var(--muted);text-decoration:none;font-size:13px;transition:color .2s"
        onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
@@ -367,8 +398,9 @@ textarea::placeholder{color:var(--muted)}
                  .51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48
                  0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
       </svg>
-      GitHub
+      <span>GitHub</span>
     </a>
+    <button class="btn-settings" id="btn-settings" title="Settings">⚙</button>
   </div>
 </header>
 
@@ -643,6 +675,19 @@ inp.addEventListener('keydown', e => {
 
 btnSend.onclick = send;
 inp.focus();
+
+// ── Settings toggle (mobile) ──────────────────────────────────────────────────
+const btnSettings = document.getElementById('btn-settings');
+const settingsBar = document.querySelector('.settings');
+if (btnSettings) {
+  // Start collapsed on mobile
+  if (window.innerWidth <= 640) settingsBar.classList.add('collapsed');
+  btnSettings.addEventListener('click', () => {
+    settingsBar.classList.toggle('collapsed');
+    btnSettings.style.color = settingsBar.classList.contains('collapsed') ? '' : 'var(--accent)';
+    btnSettings.style.borderColor = settingsBar.classList.contains('collapsed') ? '' : 'var(--accent)';
+  });
+}
 </script>
 </body>
 </html>"""
