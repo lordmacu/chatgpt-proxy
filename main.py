@@ -43,7 +43,7 @@ import time
 from typing import Optional, AsyncGenerator, Union, List
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
@@ -210,6 +210,409 @@ app = FastAPI(
     version="2.4.0",
     lifespan=lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Web UI — served at GET /
+# ---------------------------------------------------------------------------
+
+_CHAT_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChatGPT Free</title>
+<style>
+:root {
+  --bg:#07101E; --surface:#0D1A2C; --surface2:#0A1524; --border:#1A2D44;
+  --text:#D8E8F5; --muted:#7D9AB5; --accent:#00B899; --accent2:rgba(0,184,153,.15);
+  --user-bg:#0E1E35; --code-bg:#040E1A;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",sans-serif;
+  height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── header ── */
+header{background:var(--surface);border-bottom:1px solid var(--border);
+  padding:10px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.logo-name{font-family:monospace;font-weight:700;font-size:15px}
+.logo-badge{font-size:11px;background:var(--accent2);color:var(--accent);padding:2px 8px;
+  border-radius:20px;font-weight:600}
+.status-pill{font-size:12px;color:var(--muted)}
+
+/* ── settings bar ── */
+.settings{background:var(--surface2);border-bottom:1px solid var(--border);
+  padding:8px 20px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;flex-shrink:0}
+.settings select{background:var(--surface);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer;outline:none}
+.settings label{font-size:12px;color:var(--muted);cursor:pointer;
+  display:flex;align-items:center;gap:6px;user-select:none}
+.settings input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+.sys-wrap{display:flex;align-items:center;gap:8px;flex:1;min-width:200px}
+.sys-wrap span{font-size:12px;color:var(--muted);white-space:nowrap}
+.sys-wrap input{flex:1;background:var(--surface);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:4px 10px;font-size:13px;outline:none}
+.sys-wrap input::placeholder{color:var(--muted)}
+.sys-wrap input:focus{border-color:var(--accent)}
+
+/* ── messages ── */
+.msgs{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
+.msg{display:flex;gap:10px;max-width:820px;width:100%}
+.msg.user{align-self:flex-end;flex-direction:row-reverse;max-width:70%}
+.msg.assistant{align-self:flex-start}
+.avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.user .avatar{background:var(--accent);color:#fff}
+.assistant .avatar{background:var(--surface);color:var(--accent);border:1px solid var(--border);font-family:monospace}
+.bubble{padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.7;word-break:break-word}
+.user .bubble{background:var(--user-bg);border:1px solid var(--border);border-top-right-radius:3px}
+.assistant .bubble{background:var(--surface);border:1px solid var(--border);border-top-left-radius:3px}
+.bubble p{margin-bottom:8px}.bubble p:last-child{margin-bottom:0}
+.bubble pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;
+  padding:12px;overflow-x:auto;margin:8px 0;font-size:13px}
+.bubble code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px}
+.bubble :not(pre)>code{background:var(--code-bg);padding:2px 6px;border-radius:4px;
+  font-size:12px;color:var(--accent)}
+.bubble strong{font-weight:600}
+.bubble em{font-style:italic}
+.bubble ul,.bubble ol{padding-left:20px;margin:6px 0}
+.bubble li{margin-bottom:3px}
+.bubble h1{font-size:18px;margin:10px 0 6px}
+.bubble h2{font-size:16px;margin:10px 0 5px}
+.bubble h3{font-size:14px;margin:8px 0 4px}
+.bubble a{color:var(--accent);text-decoration:none}
+.bubble a:hover{text-decoration:underline}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--accent);
+  vertical-align:text-bottom;animation:blink .7s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+.meta-tag{font-size:11px;color:var(--muted);margin-top:4px;font-family:monospace;opacity:.7}
+
+/* ── empty state ── */
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;color:var(--muted);pointer-events:none}
+.empty-icon{font-size:48px}
+.empty-title{font-size:22px;font-weight:700;color:var(--text)}
+.empty-sub{font-size:14px;text-align:center;max-width:360px;line-height:1.5}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px;pointer-events:auto}
+.chip{background:var(--surface);border:1px solid var(--border);border-radius:20px;
+  padding:6px 14px;font-size:13px;color:var(--text);cursor:pointer;transition:border-color .15s}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── input area ── */
+.input-area{background:var(--surface);border-top:1px solid var(--border);padding:14px 20px;flex-shrink:0}
+.input-row{display:flex;gap:10px;align-items:flex-end;max-width:820px;margin:0 auto}
+textarea{flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);
+  border-radius:10px;padding:10px 14px;font-size:14px;resize:none;min-height:44px;max-height:150px;
+  line-height:1.5;font-family:inherit;outline:none;transition:border-color .15s}
+textarea:focus{border-color:var(--accent)}
+textarea::placeholder{color:var(--muted)}
+.btn{border:none;border-radius:8px;padding:10px 16px;font-size:13px;
+  font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.btn-send{background:var(--accent);color:#fff}
+.btn-send:hover{opacity:.85}
+.btn-send:disabled{opacity:.4;cursor:not-allowed}
+.btn-stop{background:#C0392B;color:#fff}
+.btn-stop:hover{opacity:.85}
+.btn-clear{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-clear:hover{color:var(--text);border-color:var(--muted)}
+.footer-info{font-size:11px;color:var(--muted);text-align:center;margin-top:6px}
+
+/* ── scrollbar ── */
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    <span class="logo-name">chatgpt-proxy</span>
+    <span class="logo-badge">Free</span>
+  </div>
+  <span class="status-pill" id="hdr-status">🟢 Anonymous · No account needed</span>
+</header>
+
+<div class="settings">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-size:12px;color:var(--muted)">Model</span>
+    <select id="sel-model"><option value="auto">auto</option></select>
+  </div>
+  <label><input type="checkbox" id="chk-search"> Web Search</label>
+  <label><input type="checkbox" id="chk-tools"> Adv. Tools</label>
+  <label><input type="checkbox" id="chk-canvas"> Canvas</label>
+  <label><input type="checkbox" id="chk-json"> JSON mode</label>
+  <div class="sys-wrap">
+    <span>System</span>
+    <input type="text" id="inp-system" placeholder="System prompt (optional)…">
+  </div>
+</div>
+
+<div class="msgs" id="msgs">
+  <div class="empty" id="empty">
+    <div class="empty-icon">🆓</div>
+    <div class="empty-title">ChatGPT Free</div>
+    <div class="empty-sub">No API key · No account · Powered by the ChatGPT Android anonymous API</div>
+    <div class="chips">
+      <div class="chip" onclick="prefill('Explain quantum computing in simple terms')">Explain quantum computing</div>
+      <div class="chip" onclick="prefill('Write a Python script to rename files in bulk')">Python file renamer script</div>
+      <div class="chip" onclick="prefill('What are the best practices for REST API design?')">REST API best practices</div>
+      <div class="chip" onclick="prefill('Summarize the history of the internet')">History of the internet</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-row">
+    <button class="btn btn-clear" id="btn-clear">↺ New</button>
+    <textarea id="inp" placeholder="Send a message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+    <button class="btn btn-send" id="btn-send">Send ↑</button>
+  </div>
+  <div class="footer-info" id="footer-info"></div>
+</div>
+
+<script>
+const msgs     = document.getElementById('msgs');
+const inp      = document.getElementById('inp');
+const btnSend  = document.getElementById('btn-send');
+const btnClear = document.getElementById('btn-clear');
+const footer   = document.getElementById('footer-info');
+const empty    = document.getElementById('empty');
+const selModel = document.getElementById('sel-model');
+
+let history = [];
+let abort   = null;
+
+// ── Load models ───────────────────────────────────────────────────────────────
+fetch('/v1/models').then(r => r.json()).then(data => {
+  const ids = (data.data || []).map(m => m.id).filter(Boolean);
+  if (!ids.length) return;
+  selModel.innerHTML = '';
+  ids.forEach(id => {
+    const o = document.createElement('option');
+    o.value = o.textContent = id;
+    if (id === 'auto') o.selected = true;
+    selModel.appendChild(o);
+  });
+}).catch(() => {});
+
+// ── Markdown ──────────────────────────────────────────────────────────────────
+function mdToHtml(raw) {
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Extract code blocks first, replace with placeholders
+  const blocks = [];
+  let text = raw.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push(`<pre><code class="lang-${esc(lang)}">${esc(code.trim())}</code></pre>`);
+    return `\x00BLOCK${blocks.length-1}\x00`;
+  });
+
+  // Inline code
+  text = text.replace(/`([^`\n]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
+
+  // Headers
+  text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  text = text.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
+  text = text.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
+
+  // Bold / italic
+  text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  // Lists
+  text = text.replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>');
+  text = text.replace(/(<li>[\s\S]+?<\/li>)(\n(?!<li>)|$)/g, '<ul>$1</ul>\n');
+
+  // Links
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+  // Paragraphs (double newline)
+  const paras = text.split(/\n\n+/);
+  text = paras.map(p => {
+    p = p.trim();
+    if (!p) return '';
+    if (/^<[hH\d]|^<ul|^<ol|^<li|^\x00BLOCK/.test(p)) return p;
+    return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+  }).join('\n');
+
+  // Restore code blocks
+  text = text.replace(/\x00BLOCK(\d+)\x00/g, (_, i) => blocks[+i]);
+  return text;
+}
+
+// ── Append bubble ─────────────────────────────────────────────────────────────
+function addBubble(role, text, live) {
+  if (empty.style.display !== 'none') empty.style.display = 'none';
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = role === 'user' ? 'U' : 'AI';
+  const bub = document.createElement('div');
+  bub.className = 'bubble';
+  if (role === 'user') {
+    bub.textContent = text;
+  } else {
+    bub.innerHTML = mdToHtml(text) + (live ? '<span class="cursor"></span>' : '');
+  }
+  wrap.appendChild(av);
+  wrap.appendChild(bub);
+  msgs.appendChild(wrap);
+  msgs.scrollTop = msgs.scrollHeight;
+  return bub;
+}
+
+function updateBubble(bub, text, done) {
+  bub.innerHTML = mdToHtml(text) + (done ? '' : '<span class="cursor"></span>');
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// ── Send ──────────────────────────────────────────────────────────────────────
+async function send() {
+  const text = inp.value.trim();
+  if (!text) return;
+
+  const model    = selModel.value || 'auto';
+  const search   = document.getElementById('chk-search').checked || null;
+  const tools    = document.getElementById('chk-tools').checked  || null;
+  const canvas   = document.getElementById('chk-canvas').checked || null;
+  const jsonMode = document.getElementById('chk-json').checked;
+  const sys      = document.getElementById('inp-system').value.trim();
+
+  const messages = [];
+  if (sys) messages.push({role:'system', content:sys});
+  history.forEach(m => messages.push(m));
+  messages.push({role:'user', content:text});
+
+  history.push({role:'user', content:text});
+  addBubble('user', text, false);
+  inp.value = '';
+  inp.style.height = 'auto';
+
+  btnSend.className = 'btn btn-stop';
+  btnSend.textContent = '■ Stop';
+  btnSend.onclick = stopStream;
+  footer.textContent = 'Connecting…';
+
+  const aiBub = addBubble('assistant', '', true);
+  let full = '';
+  let usedModel = model;
+
+  abort = new AbortController();
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        model, messages, stream: true,
+        web_search:       search,
+        force_use_tools:  tools,
+        force_use_canvas: canvas,
+        response_format:  jsonMode ? {type:'json_object'} : undefined,
+      }),
+      signal: abort.signal,
+    });
+
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e?.error?.message || `HTTP ${resp.status}`);
+    }
+
+    footer.textContent = 'Streaming…';
+    const reader = resp.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (raw === '[DONE]') break;
+        try {
+          const obj = JSON.parse(raw);
+          if (obj.error) throw new Error(obj.error.message);
+          if (obj.chatgpt_metadata) {
+            usedModel = obj.chatgpt_metadata.model || usedModel;
+          }
+          const delta = obj.choices?.[0]?.delta?.content;
+          if (delta) { full += delta; updateBubble(aiBub, full, false); }
+          if (obj.model) usedModel = obj.model;
+        } catch(e) { if (!e.message.includes('JSON')) throw e; }
+      }
+    }
+
+    updateBubble(aiBub, full, true);
+    history.push({role:'assistant', content:full});
+    footer.textContent = `model: ${usedModel} · ${history.length/2|0} turn(s)`;
+
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      updateBubble(aiBub, full || '_(stopped)_', true);
+      footer.textContent = 'Stopped.';
+    } else {
+      updateBubble(aiBub, `⚠️ **Error:** ${e.message}`, true);
+      footer.textContent = 'Error';
+    }
+  } finally {
+    abort = null;
+    btnSend.className = 'btn btn-send';
+    btnSend.textContent = 'Send ↑';
+    btnSend.onclick = send;
+    inp.focus();
+  }
+}
+
+function stopStream() {
+  if (abort) { abort.abort(); abort = null; }
+}
+
+// ── Clear ─────────────────────────────────────────────────────────────────────
+btnClear.onclick = () => {
+  history = [];
+  msgs.innerHTML = '';
+  msgs.appendChild(empty);
+  empty.style.display = '';
+  footer.textContent = '';
+};
+
+// ── Prefill ───────────────────────────────────────────────────────────────────
+function prefill(text) {
+  inp.value = text;
+  inp.style.height = 'auto';
+  inp.style.height = Math.min(inp.scrollHeight, 150) + 'px';
+  inp.focus();
+}
+
+// ── Auto-resize textarea ──────────────────────────────────────────────────────
+inp.addEventListener('input', () => {
+  inp.style.height = 'auto';
+  inp.style.height = Math.min(inp.scrollHeight, 150) + 'px';
+});
+
+inp.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+btnSend.onclick = send;
+inp.focus();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def chat_ui():
+    """Serve the built-in web chat interface."""
+    return HTMLResponse(content=_CHAT_HTML)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

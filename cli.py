@@ -622,7 +622,53 @@ examples:
         await session.close()
 
 
+def _run_web(port: int = 8000, no_browser: bool = False) -> None:
+    """Start the FastAPI server and open the web UI in the browser."""
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "Error: uvicorn is not installed.\n"
+            "Run: pip3 install 'uvicorn[standard]'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    url = f"http://localhost:{port}"
+    print(f"  chatgpt-proxy web UI → {url}", file=sys.stderr)
+    print("  Press Ctrl+C to stop.\n", file=sys.stderr)
+
+    if not no_browser:
+        import webbrowser, threading
+        def _open():
+            time.sleep(1.2)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+
+    try:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=port,
+            log_level="warning",
+        )
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
+    # Intercept `web` subcommand before argparse so it works synchronously
+    if len(sys.argv) >= 2 and sys.argv[1] == "web":
+        _port = 8000
+        _no_browser = False
+        for _arg in sys.argv[2:]:
+            if _arg.lstrip("-").isdigit():
+                _port = int(_arg.lstrip("-"))
+            elif _arg in ("--no-browser", "-n"):
+                _no_browser = True
+        _run_web(_port, _no_browser)
+        sys.exit(0)
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
