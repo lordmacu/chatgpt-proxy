@@ -382,10 +382,11 @@ textarea::placeholder{color:var(--muted)}
   .msgs{padding:12px 10px;gap:10px}
   .msg.user{max-width:88%}
   .bubble{font-size:13px;padding:9px 12px}
-  .input-area{padding:10px 12px}
-  .input-row{gap:7px}
-  .btn-clear{padding:10px 10px;font-size:12px}
-  .btn-send{padding:10px 13px;font-size:13px}
+  .input-area{padding:10px 12px 8px}
+  .input-row{flex-wrap:wrap;gap:7px}
+  textarea{order:0;flex:1 1 100%;min-height:42px;font-size:14px}
+  .btn-clear{order:1;flex:0 0 auto;padding:9px 14px;font-size:13px}
+  .btn-send{order:2;flex:1;padding:9px 0;font-size:14px;font-weight:700}
   .footer-info{font-size:10px}
   .empty-icon{font-size:36px}
   .empty-title{font-size:18px}
@@ -710,6 +711,7 @@ inp.addEventListener('keydown', e => {
 });
 
 btnSend.onclick = send;
+if (window.innerWidth <= 640) inp.placeholder = 'Message…';
 inp.focus();
 
 // ── Hamburger menu (mobile) ───────────────────────────────────────────────────
