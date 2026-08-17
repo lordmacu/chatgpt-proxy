@@ -622,7 +622,7 @@ examples:
         await session.close()
 
 
-def _run_web(port: int = 8000, no_browser: bool = False) -> None:
+def _run_web(port: int = 7842, no_browser: bool = False) -> None:
     """Start the FastAPI server and open the web UI in the browser."""
     try:
         import uvicorn
@@ -659,7 +659,7 @@ def _run_web(port: int = 8000, no_browser: bool = False) -> None:
 if __name__ == "__main__":
     # Intercept `web` subcommand before argparse so it works synchronously
     if len(sys.argv) >= 2 and sys.argv[1] == "web":
-        _port = 8000
+        _port = 7842
         _no_browser = False
         for _arg in sys.argv[2:]:
             if _arg.lstrip("-").isdigit():
