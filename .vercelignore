@@ -1,0 +1,9 @@
+.env
+docs/
+chatgpt-proxy/
+login.py
+login_playwright.py
+chatgpt-proxy.postman_collection.json
+cli.py
+requirements-prod.txt
+*.postman_collection.json
