@@ -496,10 +496,10 @@ Retrying with a fresh session…
 | JSON output mode | ✅ |
 | File attachments (PDF, text, code) | ✅ |
 | Quota auto-rotation | ✅ |
-| Image input (vision) | ❌ Anonymous mode only |
-| Image generation | ❌ Anonymous mode only |
-| Function calling (tool_calls in response) | ❌ |
-| Voice / TTS | ❌ Requires account |
+| Image input (vision) | ❌ Not available in anonymous mode |
+| Image generation | ❌ Not available in anonymous mode |
+| Function calling (tool_calls in response) | ❌ Anonymous backend never returns tool_calls |
+| Voice / TTS | ❌ Requires a logged-in account |
 
 ---
 
