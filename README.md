@@ -1,4 +1,8 @@
-# chatgpt-proxy
+# 🆓 ChatGPT Free
+
+### Use ChatGPT completely free — no API key, no account, no credit card.
+
+> OpenAI-compatible proxy that routes requests through the ChatGPT Android anonymous endpoint.
 
 An OpenAI-compatible API proxy that routes requests through the ChatGPT Android anonymous endpoint — no API key, no account required.
 
