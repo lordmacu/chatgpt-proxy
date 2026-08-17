@@ -236,7 +236,7 @@ async def _token_guard(request: Request, call_next):
 # Web UI — served at GET /
 # ---------------------------------------------------------------------------
 
-_CHAT_HTML = """<!DOCTYPE html>
+_CHAT_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
