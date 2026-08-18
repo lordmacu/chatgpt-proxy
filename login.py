@@ -2,7 +2,7 @@
 ChatGPT Android — login con email/password via PKCE + first_party_authorize.
 Obtiene access_token, refresh_token, id_token y los guarda en tokens.json.
 """
-import os, json, hashlib, base64, secrets, re, asyncio
+import os, json, hashlib, base64, secrets, re, asyncio, getpass
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, quote
 import httpx
@@ -15,8 +15,47 @@ if _env.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-EMAIL    = os.environ["EMAIL"]
-PASSWORD = os.environ["PASSWORD"]
+def _ask(prompt: str, secret: bool = False) -> str:
+    """Read one value from the operator, secret ones without echo.
+
+    Credentials used to be REQUIRED in .env, so the only way to run this was to
+    write your password to a file first -- and a placeholder copied from
+    instructions ("EMAIL=tu-correo") reached OpenAI verbatim and came back as an
+    opaque 400. Asking is both safer (getpass does not echo, and nothing lands
+    in shell history) and clearer about what went in.
+    """
+    value = ""
+    while not value.strip():
+        try:
+            value = getpass.getpass(prompt) if secret else input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelado.")
+            raise SystemExit(1)
+        if not value.strip():
+            print("  (no puede quedar vacío)")
+    return value.strip()
+
+
+# .env still wins when it is filled in -- a container has no one to prompt --
+# but it is no longer required: an interactive run just asks.
+EMAIL    = os.environ.get("EMAIL", "").strip()
+PASSWORD = os.environ.get("PASSWORD", "")
+
+# A leftover placeholder is worse than nothing: it reaches the server and comes
+# back as a 400 that says nothing about the real cause. Treat it as absent.
+_PLACEHOLDERS = {"tu-correo", "tu-clave", "tu-contraseña", "tu-contrasena",
+                 "your-email", "your-password", "email@example.com", "changeme"}
+if EMAIL.lower() in _PLACEHOLDERS:
+    print(f"Ignorando EMAIL={EMAIL!r} en .env: es un valor de ejemplo, no un correo.")
+    EMAIL = ""
+if PASSWORD.strip().lower() in _PLACEHOLDERS:
+    print("Ignorando PASSWORD en .env: es un valor de ejemplo.")
+    PASSWORD = ""
+
+if not EMAIL:
+    EMAIL = _ask("Correo de la cuenta ChatGPT: ")
+if not PASSWORD:
+    PASSWORD = _ask(f"Contraseña de {EMAIL}: ", secret=True)
 
 # ── Constantes (capturadas con Frida del APK) ─────────────────────────────────
 AUTH_BASE    = "https://auth.openai.com"
@@ -211,11 +250,65 @@ async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
         qs = parse_qs(parsed.query)
         code = qs.get("code", [None])[0]
 
+    # ── Paso 3b: pasos extra que el servidor pida (código por correo, MFA) ────
+    #
+    # This used to raise here. OpenAI does not always go straight from password
+    # to authorization code: it can insert a verification step and mail a code,
+    # and the flow is the SAME endpoint with another page type. Rather than
+    # enumerate page names that will change, this loops: while there is no code
+    # and the server keeps describing a page, ask the operator for the value
+    # that page needs and send it back.
+    #
+    # Bounded at 5 rounds so a page that keeps returning itself (a rejected
+    # code, say) ends with a clear message instead of prompting forever.
+    _CODE_FIELDS = ("code", "otp", "one_time_code", "verification_code", "token")
+    for _ in range(5):
+        if code:
+            break
+        page = (data3.get("page") or {})
+        page_type = page.get("type") or ""
+        if not page_type:
+            break
+        print(f"[3b] El servidor pide otro paso: {page_type}")
+        # What to call the thing we ask for. The page usually names the field;
+        # when it does not, "code" is the overwhelmingly common case.
+        field = next((f for f in _CODE_FIELDS if f in json.dumps(page).lower()), "code")
+        hint = "Código que te llegó por correo" if "mail" in page_type.lower() else \
+               f"Valor para '{page_type}'"
+        value = _ask(f"    {hint}: ")
+        r_extra = await client.post(
+            f"{AUTH_BASE}/api/first_party_authorize/next",
+            json={"origin_page_type": page_type, "session_id": session_id,
+                  "identifier": email, field: value},
+            headers=extra_headers,
+        )
+        print(f"    → {r_extra.status_code}")
+        if r_extra.status_code not in (200, 201):
+            raise RuntimeError(f"Paso '{page_type}' falló: {r_extra.status_code} "
+                               f"{r_extra.text[:300]}")
+        try:
+            data3 = r_extra.json()
+        except ValueError:
+            data3 = {}
+        print(f"    keys: {list(data3.keys())}")
+        code = data3.get("code")
+        for f in ("redirect_to", "redirect_uri", "location", "url"):
+            if code:
+                break
+            if f in data3:
+                qs = parse_qs(urlparse(data3[f]).query)
+                code = qs.get("code", [None])[0]
+        if not code and "location" in r_extra.headers:
+            qs = parse_qs(urlparse(r_extra.headers["location"]).query)
+            code = qs.get("code", [None])[0]
+
     if not code:
-        # Puede necesitar un paso extra (e.g. MFA o captcha)
         print("    No se obtuvo 'code'. Respuesta completa:")
         print(f"    {json.dumps(data3, indent=2)[:800]}")
-        raise RuntimeError("No se pudo obtener el authorization code. Revisar flujo.")
+        raise RuntimeError(
+            "No se pudo obtener el authorization code.\n"
+            "    Si la cuenta pide captcha o un paso que no se puede responder por\n"
+            "    consola, usá login_playwright.py, que abre un navegador real.")
 
     print(f"[4] Code obtenido: {code[:30]}...")
 
