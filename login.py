@@ -52,10 +52,20 @@ if PASSWORD.strip().lower() in _PLACEHOLDERS:
     print("Ignorando PASSWORD en .env: es un valor de ejemplo.")
     PASSWORD = ""
 
-if not EMAIL:
-    EMAIL = _ask("Correo de la cuenta ChatGPT: ")
-if not PASSWORD:
-    PASSWORD = _ask(f"Contraseña de {EMAIL}: ", secret=True)
+def credentials() -> tuple[str, str]:
+    """Resolve (email, password), prompting only for what is missing.
+
+    Called from login(), NOT at import time. Prompting at module level meant that
+    merely importing this file blocked on input() -- so any script that reused
+    pkce_pair/AUTH_BASE (or a test, or a diagnostic) hung forever with no output
+    instead of doing its job. Import must never require a human.
+    """
+    email, password = EMAIL, PASSWORD
+    if not email:
+        email = _ask("Correo de la cuenta ChatGPT: ")
+    if not password:
+        password = _ask(f"Contraseña de {email}: ", secret=True)
+    return email, password
 
 # ── Constantes (capturadas con Frida del APK) ─────────────────────────────────
 AUTH_BASE    = "https://auth.openai.com"
@@ -88,7 +98,9 @@ def pkce_pair() -> tuple[str, str]:
 
 # ── Login ─────────────────────────────────────────────────────────────────────
 
-async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
+async def login(email: str = "", password: str = "") -> dict:
+    if not email or not password:
+        email, password = credentials()
     verifier, challenge = pkce_pair()
     state = _b64url(secrets.token_bytes(24))
     nonce = _b64url(secrets.token_bytes(24))
@@ -118,6 +130,15 @@ async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
         "response_type":                  "code",
         "hydra_flow":                     "condense",
     }
+    # This IS the right entry point, and the tempting "correction" is wrong.
+    # The decompiled APK has a class `go4` returning "api/accounts/authorize/native"
+    # and switching to it looks obviously right -- it is not. Measured: that path
+    # rejects GET with 405, and POSTing to it answers
+    # `Missing required parameter: 'subject_token'`. It is the OAuth token-EXCHANGE
+    # endpoint (the ACCESS_FLOW_PAGE_TYPE_SOCIAL_TOKEN_EXCHANGE branch, used when
+    # signing in with Google), not the start of an email/password flow. This path
+    # answers 200 with page.type=login_or_signup_start, which is exactly what the
+    # next step consumes.
     r1 = await client.get(f"{AUTH_BASE}/api/accounts/authorize", params=params)
     print(f"    → {r1.status_code}")
     if r1.status_code not in (200, 302):
@@ -203,7 +224,12 @@ async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
 
     # ── Paso 3: enviar password ───────────────────────────────────────────────
     print("[3] Enviando password...")
-    page_type2 = data2.get("page", {}).get("type", "login_enter_password")
+    # "login_enter_password" was a guess and does not exist anywhere in the app.
+    # The real serialized value is "login_password" (enum
+    # ACCESS_FLOW_PAGE_TYPE_LOGIN_PASSWORD; the literal is in the dex string
+    # table). Only used as a FALLBACK -- the server names the page in its own
+    # response, which is always more current than anything hard-coded here.
+    page_type2 = data2.get("page", {}).get("type", "login_password")
     body3 = {
         "origin_page_type": page_type2,
         "session_id":       session_id,
@@ -261,6 +287,29 @@ async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
     #
     # Bounded at 5 rounds so a page that keeps returning itself (a rejected
     # code, say) ends with a clear message instead of prompting forever.
+    # The app's real state machine, read from the decompiled APK (enum
+    # ACCESS_FLOW_PAGE_TYPE_* / ACCESS_FLOW_FIELD_*). The enum NAME and the wire
+    # value are different things, so these literals are the lowercase ones
+    # actually present in the dex string table:
+    #
+    #   login_or_signup_start   -> identifier   (step 2)
+    #   login_password          -> password     (step 3)
+    #   email_otp_send / email_otp_verification -> otp
+    #   mfa_challenge / mfa_challenge_selection -> otp
+    #   login_passkey, contact_verification, sso ... -> not answerable from a console
+    #
+    # The loop stays generic even so: OpenAI adds page types without warning and a
+    # closed list silently breaks on the next one. This map names the prompt; it
+    # is not a gate.
+    _FIELD_BY_PAGE = {
+        "login_or_signup_start":   "identifier",
+        "login_password":          "password",
+        "email_otp_send":          "otp",
+        "email_otp_verification":  "otp",
+        "phone_otp_verification":  "otp",
+        "mfa_challenge":           "otp",
+        "mfa_challenge_selection": "otp",
+    }
     _CODE_FIELDS = ("code", "otp", "one_time_code", "verification_code", "token")
     for _ in range(5):
         if code:
@@ -272,9 +321,16 @@ async def login(email: str = EMAIL, password: str = PASSWORD) -> dict:
         print(f"[3b] El servidor pide otro paso: {page_type}")
         # What to call the thing we ask for. The page usually names the field;
         # when it does not, "code" is the overwhelmingly common case.
-        field = next((f for f in _CODE_FIELDS if f in json.dumps(page).lower()), "code")
-        hint = "Código que te llegó por correo" if "mail" in page_type.lower() else \
-               f"Valor para '{page_type}'"
+        field = (_FIELD_BY_PAGE.get(page_type)
+                 or next((f for f in _CODE_FIELDS if f in json.dumps(page).lower()), "otp"))
+        if "email_otp" in page_type:
+            hint = "Código que te llegó por correo"
+        elif "phone_otp" in page_type:
+            hint = "Código que te llegó por SMS"
+        elif "mfa" in page_type:
+            hint = "Código de tu app de autenticación (MFA)"
+        else:
+            hint = f"Valor para '{page_type}'"
         value = _ask(f"    {hint}: ")
         r_extra = await client.post(
             f"{AUTH_BASE}/api/first_party_authorize/next",
