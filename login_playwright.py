@@ -13,8 +13,23 @@ if _env.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-EMAIL    = os.environ["EMAIL"]
-PASSWORD = os.environ["PASSWORD"]
+import getpass
+
+EMAIL    = os.environ.get("EMAIL", "").strip()
+PASSWORD = os.environ.get("PASSWORD", "")
+
+_PLACEHOLDERS = {"tu-correo", "tu-clave", "tu-contraseña", "tu-contrasena",
+                 "your-email", "your-password", "changeme"}
+if EMAIL.lower() in _PLACEHOLDERS:
+    EMAIL = ""
+if PASSWORD.strip().lower() in _PLACEHOLDERS:
+    PASSWORD = ""
+
+if not EMAIL:
+    EMAIL = input("Correo de la cuenta ChatGPT: ").strip()
+# PASSWORD is intentionally NOT prompted here: this account may be passwordless
+# (login by emailed code only). The browser flow asks for whatever the page
+# actually shows, and the password is filled only if a password field appears.
 
 AUTH_BASE    = "https://auth.openai.com"
 CLIENT_ID    = "app_xwBKzt04752TTSfXnki17hmB"
@@ -149,15 +164,27 @@ async def login():
                 break
 
         # Llenar password
+        # Password step is OPTIONAL. A passwordless account (login by emailed code)
+        # never shows a password field, and forcing one here is exactly what broke
+        # this for such accounts. If a field appears and we have a password, fill
+        # it; otherwise leave it for you to complete in the visible window.
         try:
-            await page.wait_for_selector('input[type="password"]', timeout=15000)
-            await page.fill('input[type="password"]', PASSWORD)
-            print(f"    password llenado")
-            await page.keyboard.press("Enter")
-            print(f"    Enter → submit password")
-        except Exception as e:
-            print(f"    Password field not found: {e}")
-            raise
+            await page.wait_for_selector('input[type="password"]', timeout=8000)
+            if PASSWORD:
+                await page.fill('input[type="password"]', PASSWORD)
+                await page.keyboard.press("Enter")
+                print("    password llenado y enviado")
+            else:
+                print("    *** Esta cuenta pide contraseña — escríbela en la ventana ***")
+        except Exception:
+            print("    (no hay campo de contraseña — cuenta passwordless, seguimos)")
+
+        # Whatever comes next -- an emailed code, an MFA code -- happens in the
+        # BROWSER. This waits up to 5 minutes for you to finish, watching for the
+        # OAuth redirect that carries the authorization code. Nothing is typed for
+        # you here; you complete the human steps and the script catches the result.
+        print("\n    >>> Completa lo que falte EN LA VENTANA (código del correo, etc.)")
+        print("    >>> Tienes hasta 5 minutos. Esperando el redirect de OAuth...\n")
 
         # Esperar redirect al custom scheme o a timeout
         print(f"[4] Esperando redirect OAuth...")
@@ -178,7 +205,12 @@ async def login():
                 print(f"    Timeout esperando MFA: {e}")
 
         try:
-            code = await asyncio.wait_for(redirect_future, timeout=30.0)
+            # 5 minutes, not 30 seconds: reading an emailed code and typing it back
+            # is a human step, and 30s guaranteed a timeout for exactly the
+            # passwordless flow this is meant to support. The redirect fires the
+            # instant the browser finishes, so a fast login still returns fast --
+            # this only raises the ceiling for the slow, human case.
+            code = await asyncio.wait_for(redirect_future, timeout=300.0)
             print(f"    code capturado: {code[:30]}...")
         except asyncio.TimeoutError:
             current = page.url
