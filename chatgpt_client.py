@@ -6,6 +6,8 @@ import uuid, json, hashlib, time, sys, os
 from typing import AsyncGenerator, Optional
 import httpx
 
+import auth
+
 # Genui/cite widget delimiters (Unicode PUA: U+E200=start, U+E202=sep, U+E201=end)
 # Format: <U+E200>{type}<U+E202>{content}<U+E201>  where type='cite'|'genui'
 _WIDGET_RE    = re.compile('genui(.*?)', re.DOTALL)
@@ -82,8 +84,18 @@ SENTINEL_PAYLOAD = json.dumps({
 }, separators=(',', ':'))
 
 
+# The backend is split by whether the caller has an account. Anonymous traffic
+# goes to /backend-anon/..., an authenticated session to /backend-api/... -- the
+# paths are otherwise identical, which is why one helper covers both and every
+# call site stops hard-coding the prefix.
+def _api(path: str) -> str:
+    """`/models` -> `/backend-anon/models` or `/backend-api/models`."""
+    prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
+    return prefix + path
+
+
 def _base_headers(device_id: str) -> dict:
-    return {
+    headers = {
         "User-Agent":               f"ChatGPT/{APP_VERSION} (Android 16; sdk_gphone64_arm64; build 2622307)",
         "OAI-Package-Name":         "com.openai.chatgpt",
         "OAI-Client-Type":          "android",
@@ -94,6 +106,12 @@ def _base_headers(device_id: str) -> dict:
         "ChatGPT-Residency-Region": "no_constraint",
         "Accept":                   "application/json",
     }
+    # Additive on purpose: with nothing configured this is a no-op and every
+    # request is byte-for-byte what the anonymous path has always sent.
+    token = auth.access_token()
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
 
 
 class ChatGPTSession:
@@ -143,10 +161,10 @@ class ChatGPTSession:
     async def _get_models(self) -> list:
         hdrs = {
             **_base_headers(self.device_id),
-            "X-OpenAI-Target-Path": "/backend-anon/models",
+            "X-OpenAI-Target-Path": _api("/models"),
         }
         r = await self.client.get(
-            f"{BASE}/backend-anon/models",
+            f"{BASE}" + _api("/models"),
             params={"iim": "false", "supports_model_picker_upgrade_presets": "true"},
             headers=hdrs,
         )
@@ -156,11 +174,11 @@ class ChatGPTSession:
     async def _chat_requirements(self) -> None:
         hdrs = {
             **_base_headers(self.device_id),
-            "X-OpenAI-Target-Path": "/backend-anon/sentinel/chat-requirements",
+            "X-OpenAI-Target-Path": _api("/sentinel/chat-requirements"),
             "Content-Type": "application/json",
         }
         r = await self.client.post(
-            f"{BASE}/backend-anon/sentinel/chat-requirements",
+            f"{BASE}" + _api("/sentinel/chat-requirements"),
             headers=hdrs,
             content=b"{}",
         )
@@ -277,28 +295,42 @@ class ChatGPTSession:
             "x-oai-convo-session-id": session_id,
             "x-oai-turn-trace-id":  str(uuid.uuid4()),
             "OAI-Echo-Logs":        "1,0,0,0",
-            "X-OpenAI-Target-Path": "/backend-anon/f/conversation",
+            "X-OpenAI-Target-Path": _api("/f/conversation"),
             "Content-Type":         "application/json",
         }
 
         encoded = json.dumps(body, separators=(',', ':')).encode()
 
-        _log(f"POST /backend-anon/f/conversation  model={real_model} json_mode={json_mode}")
+        _log(f"POST {_api('/f/conversation')}  model={real_model} json_mode={json_mode}")
         async with self.client.stream(
             "POST",
-            f"{BASE}/backend-anon/f/conversation",
+            f"{BASE}" + _api("/f/conversation"),
             headers=hdrs,
             content=encoded,
         ) as resp:
             _log(f"HTTP {resp.status_code}")
 
             if resp.status_code == 401:
-                _log("401 → refreshing session and retrying")
+                # Two different recoveries share this branch, and the order
+                # matters. When running with an ACCOUNT, a 401 means the access
+                # token expired -- re-minting the anonymous session would not fix
+                # it and would silently downgrade an authenticated deployment to
+                # the anonymous backend, which is exactly the kind of quiet
+                # capability loss the gateway's tools:false declaration exists to
+                # prevent. So: refresh the token FIRST, and only fall through to
+                # re-initialising the session (the original, anonymous-path
+                # behaviour) when there was no token to refresh.
+                if auth.is_authenticated():
+                    _log("401 → refreshing the access token and retrying")
+                    if auth.refresh_access_token():
+                        hdrs = {**hdrs, **_base_headers(self.device_id)}
+                else:
+                    _log("401 → refreshing session and retrying")
                 self._ready = False
                 await self.initialize()
                 async with self.client.stream(
                     "POST",
-                    f"{BASE}/backend-anon/f/conversation",
+                    f"{BASE}" + _api("/f/conversation"),
                     headers=hdrs,
                     content=encoded,
                 ) as resp2:
@@ -617,11 +649,11 @@ async def fetch_anon_models() -> list:
     device_id = str(uuid.uuid4())
     hdrs = {
         **_base_headers(device_id),
-        "X-OpenAI-Target-Path": "/backend-anon/models",
+        "X-OpenAI-Target-Path": _api("/models"),
     }
     async with httpx.AsyncClient(verify=True, timeout=10.0, follow_redirects=True) as client:
         r = await client.get(
-            f"{BASE}/backend-anon/models",
+            f"{BASE}" + _api("/models"),
             params={"iim": "false", "supports_model_picker_upgrade_presets": "true"},
             headers=hdrs,
         )

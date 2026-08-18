@@ -54,6 +54,8 @@ from chatgpt_client import (
 )
 import httpx as _httpx
 
+import auth
+
 # ---------------------------------------------------------------------------
 # Per-user stores  {user_id: {file_id: {...}}}  /  {user_id: SessionPool}
 # ---------------------------------------------------------------------------
@@ -1262,6 +1264,12 @@ async def health():
     return {
         "status":               "ok",
         "version":              "2.4.0",
+        # Which backend this process is actually talking to. Without it the two
+        # modes are indistinguishable from outside, and "anonymous" is the one
+        # that silently lacks vision, image generation and function calling --
+        # so a deployment whose token failed to load looks perfectly healthy
+        # while quietly serving a weaker backend.
+        "auth_mode":            "account" if auth.is_authenticated() else "anonymous",
         "active_users":         len(_pools),
         "total_sessions":       total_sessions,
         "total_files_in_memory": total_files,
