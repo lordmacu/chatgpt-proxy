@@ -1,31 +1,43 @@
 """
 FastAPI proxy — OpenAI-compatible API backed by the ChatGPT Android anonymous flow.
 
-Available endpoints:
-  POST /v1/chat/completions   — chat (streaming + non-streaming, multipart content, files)
-  GET  /v1/models             — list of models available in anonymous mode
-  POST /v1/files              — upload a file (PDF, code, docs) → file_id
-  GET  /v1/files              — list uploaded files
-  GET  /v1/files/{file_id}    — file info
-  DEL  /v1/files/{file_id}    — delete a file
-  GET  /v1/session/me         — anonymous session info (user id, device id)
-  GET  /health                — server status
+Endpoints — [A] works anonymously, [L] needs a logged-in account.
+`GET /health` reports which mode is live as auth_mode: "anonymous" | "account".
 
-Anonymous flow capabilities:
-  ✅ Text chat with GPT-5.5 / 5.6 Luna / 5.3 Mini / auto
-  ✅ Streaming SSE
-  ✅ Multi-turn (within session, ~30 min TTL)
-  ✅ System prompt (persistent in session, injected on first turn only)
-  ✅ Text attachments: PDF, code, docs (82 MIME types, retrieval mode)
-  ✅ Web search — auto, or controlled with web_search: true/false
-  ✅ Advanced tools — reservations, shopping, genui widgets (force_use_tools: true)
-  ✅ Canvas (collaborative documents) — force_use_canvas: true
-  ✅ JSON output — response_format: {"type": "json_object"}
-  ✅ Quota exhaustion: auto-recycles device_id on 429/403, transparent retry
-  ❌ Image input (vision) — not available in anonymous mode
-  ❌ Image generation — not available in anonymous mode
-  ❌ Function calling / tool_calls in response — not supported by anonymous backend
-  ❌ Voice / TTS — requires an account
+  [A] POST /v1/chat/completions        — chat (streaming + non-streaming, files)
+  [A] GET  /v1/models                  — models available in the current mode
+  [A] GET  /v1/session/me              — session info (user id, device id)
+  [A] GET  /v1/limits                  — per-feature remaining counts
+  [A] POST /v1/translate               — translate text (spends no chat message)
+  [A] POST|GET|DEL /v1/files[/{id}]    — proxy-local file store, never touches the account
+  [A] GET  /health, GET /              — status, built-in web chat UI
+  [A] GET  /images/{f}, /audio/{f}     — serve files the proxy already cached locally
+  [L] GET  /v1/account                 — plan, id
+  [L] GET|POST /v1/custom-instructions — the account's custom instructions
+  [L] GET  /v1/gizmos[/{id}]           — custom GPTs (also model: "g-...")
+  [L] GET  /v1/conversations[/{id}]    — server-side history (anonymous turns are never stored)
+  [L] GET  /v1/library[...]            — the account's file library
+  [L] GET  /v1/suggestions             — prompt-library starters
+  [L] POST /v1/audio/transcriptions    — speech-to-text
+  [L] POST /v1/audio/speech            — TTS (/backend-anon/synthesize does not exist)
+  [L] GET  /v1/audio/from-message      — TTS of a stored message (same backend)
+  [L] POST /v1/images/generations      — image generation
+
+Account-only endpoints answer 401 with type "auth_error".
+
+Chat capabilities — anonymous | account:
+  ✅|✅ Text chat, streaming SSE, multi-turn (~30 min TTL), system prompt
+  ✅|✅ Text attachments: PDF, code, docs (82 MIME types, retrieval mode)
+  ✅|✅ Web search (web_search), advanced tools (force_use_tools), Canvas (force_use_canvas)
+  ✅|✅ JSON output — response_format: {"type": "json_object"}
+  ✅|✅ thinking_effort / reasoning_effort, service_tier
+  ✅|—  Quota exhaustion: auto-recycles device_id on 429/403, transparent retry
+  34,834 | 52,815 token context window (262,144 on the -t-mini models)
+  ❌|✅ Reasoning models (gpt-5-4-t-mini, gpt-5-6-t-mini), research, custom GPTs
+  ❌|✅ Image generation, TTS, speech-to-text
+  ❌|❌ Image input (vision) — not exposed on this endpoint
+  ❌|❌ Function calling / tool_calls in the response — see below
+  ❌|❌ temperature, top_p, max_tokens, penalties, stop, seed, n — see below
 
 OpenAI `tools` field compatibility (input-only):
   The `tools` array is accepted for compatibility, but the backend never returns
@@ -1284,6 +1296,12 @@ async def _image_via_chat_completions(
     the caller asked for stream:true we still generate synchronously (image
     generation is inherently blocking) and emit a single content delta.
     """
+    # Image generation needs an account -- fail fast so an anonymous call does
+    # not spend a message and then 503 with "ensure the account is authenticated".
+    if not auth.is_authenticated():
+        return JSONResponse(status_code=401, content={"error": {
+            "message": "Image generation requires an authenticated account "
+                       "(set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}})
     prompt = _extract_image_prompt(req.messages)
     if not prompt:
         raise HTTPException(400, detail={"error": {"message": "No text prompt found in messages."}})
@@ -1567,6 +1585,12 @@ class ImageGenerationRequest(BaseModel):
 
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request):
+    # Fail fast when anonymous: image generation needs an account, and without
+    # this the message is spent before the 503.
+    if not auth.is_authenticated():
+        return JSONResponse(status_code=401, content={"error": {
+            "message": "Image generation requires an authenticated account "
+                       "(set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}})
     user_id  = _get_user_id(request)
     pool     = _user_pool(user_id)
     msgs_raw = [{"role": "user", "content": req.prompt}]
@@ -2364,11 +2388,12 @@ async def audio_from_message(
     `conversation_id` + `message_id` (get them from /v1/conversations/{id}) --
     it is NOT free-text TTS (`synthesize` rejects arbitrary text). Returns the
     raw audio bytes with the upstream content-type. `voice` defaults to juniper;
-    `format` to mp3 (also aac). Works authenticated and anonymous, but the
-    conversation must belong to the caller's identity.
+    `format` to mp3 (also aac). Authenticated only -- synthesize has no anonymous
+    endpoint, and the conversation must belong to the account.
     """
-    prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
-    path   = prefix + "/synthesize"
+    if not auth.is_authenticated():
+        return _needs_account()
+    path = "/backend-api/synthesize"
 
     user_id  = _get_user_id(request)
     pool     = _user_pool(user_id)
@@ -2392,11 +2417,13 @@ async def audio_from_message(
             await client.aclose()
 
     if r.status_code != 200:
-        # Bubble up the backend's own error (404 no-access, 422 bad params, ...).
+        # Bubble up the backend's own error (404 no-access, 422 bad params, ...),
+        # unwrapping the upstream {"detail": ...} so it is not double-nested.
         try:
-            detail = r.json()
+            j = r.json()
+            detail = j.get("detail", j) if isinstance(j, dict) else j
         except Exception:
-            detail = {"message": r.text[:200]}
+            detail = r.text[:200]
         return JSONResponse(status_code=r.status_code,
                             content={"error": {"type": "synthesize_error", "detail": detail}})
 
@@ -2428,6 +2455,10 @@ async def audio_speech(req: SpeechRequest, request: Request):
     if not text:
         return JSONResponse(status_code=400, content={"error": {
             "message": "'input' is required", "type": "invalid_request_error"}})
+    # synthesize is authenticated-only; check BEFORE the chat turn so an
+    # anonymous call fails fast instead of burning a message and then 401-ing.
+    if not auth.is_authenticated():
+        return _needs_account()
 
     # Have the model reproduce the text; retry once if it isn't verbatim.
     session = None
@@ -2448,8 +2479,7 @@ async def audio_speech(req: SpeechRequest, request: Request):
             return JSONResponse(status_code=502, content={"error": {
                 "message": "no se pudo obtener el mensaje a sintetizar", "type": "upstream_error"}})
 
-        prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
-        path   = prefix + "/synthesize"
+        path = "/backend-api/synthesize"
         r = await session.client.get(f"{BASE}{path}",
             headers={**_base_headers(session.device_id), "X-OpenAI-Target-Path": path},
             params={"conversation_id": cid, "message_id": mid,
@@ -2460,9 +2490,10 @@ async def audio_speech(req: SpeechRequest, request: Request):
 
     if r.status_code != 200:
         try:
-            detail = r.json()
+            j = r.json()
+            detail = j.get("detail", j) if isinstance(j, dict) else j
         except Exception:
-            detail = {"message": r.text[:200]}
+            detail = r.text[:200]
         return JSONResponse(status_code=r.status_code,
                             content={"error": {"type": "synthesize_error", "detail": detail}})
 
