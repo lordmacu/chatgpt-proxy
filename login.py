@@ -7,6 +7,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, quote
 import httpx
 
+import dpop
+
 # ── Credenciales ─────────────────────────────────────────────────────────────
 _env = Path(__file__).parent / ".env"
 if _env.exists():
@@ -85,6 +87,31 @@ HEADERS_BASE = {
 }
 
 TOKEN_FILE = Path(__file__).parent / "tokens.json"
+
+
+async def _post_token(client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+    """POST /oauth/token, attaching a DPoP proof when DPoP is enabled.
+
+    Binding happens HERE: the token exchange must carry the proof so the issued
+    tokens get sender-constrained to our key; then auth.py can refresh with the
+    same key. Honors one DPoP-Nonce challenge (retry with the echoed nonce).
+    When DPoP is off `dpop.proof()` returns None -- identical to the plain call.
+    """
+    url = f"{AUTH_BASE}/oauth/token"
+    r = None
+    for attempt in (1, 2):
+        headers = {}
+        proof = dpop.proof(url, "POST")  # token endpoint: no `ath`
+        if proof:
+            headers["DPoP"] = proof
+        r = await client.post(url, json=payload, headers=headers)
+        dpop.remember_nonce(r.headers)
+        if (attempt == 1 and proof and r.status_code in (400, 401)
+                and r.headers.get("DPoP-Nonce")):
+            continue
+        break
+    return r
+
 
 # ── PKCE helpers ──────────────────────────────────────────────────────────────
 
@@ -370,9 +397,9 @@ async def login(email: str = "", password: str = "") -> dict:
 
     # ── Paso 5: intercambiar code por tokens ──────────────────────────────────
     print("[5] Intercambiando code por tokens...")
-    r4 = await client.post(
-        f"{AUTH_BASE}/oauth/token",
-        json={
+    r4 = await _post_token(
+        client,
+        {
             "grant_type":    "authorization_code",
             "code":          code,
             "redirect_uri":  REDIRECT_URI,
@@ -406,9 +433,9 @@ async def login(email: str = "", password: str = "") -> dict:
 async def refresh(refresh_token: str) -> dict:
     """Renueva el access_token usando el refresh_token."""
     client = httpx.AsyncClient(headers=HEADERS_BASE, timeout=30.0)
-    r = await client.post(
-        f"{AUTH_BASE}/oauth/token",
-        json={
+    r = await _post_token(
+        client,
+        {
             "grant_type":    "refresh_token",
             "refresh_token": refresh_token,
             "client_id":     CLIENT_ID,
