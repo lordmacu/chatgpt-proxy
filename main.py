@@ -1838,6 +1838,24 @@ async def _backend_post(request: Request, path: str, json_body: dict):
             await client.aclose()
 
 
+async def _backend_request(request: Request, method: str, path: str):
+    """Generic bodyless backend call (DELETE, no-body POST) with the usual client."""
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=20.0, follow_redirects=True)
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        return await client.request(method, f"{BASE}{path}", headers=hdrs)
+    finally:
+        if owns:
+            await client.aclose()
+
+
 @app.get("/v1/gizmos")
 async def gizmos(request: Request):
     """List the account's custom GPTs (gizmos). Use an id as the chat `model`
@@ -2081,8 +2099,14 @@ async def library_usage(request: Request):
 
 
 @app.get("/v1/library/{file_id}/download")
-async def library_download(file_id: str, request: Request):
-    """Get a presigned download URL for a library file."""
+async def library_download(file_id: str, request: Request, url: bool = False):
+    """Download a library file. Takes the `file_id` (not the library id).
+
+    The backend hands back a presigned estuary URL that still requires the
+    account's Bearer token, so by default the proxy fetches the bytes itself and
+    streams the file back (usable without any auth on the client). Pass `?url=1`
+    to instead get the raw (auth-gated) download_url.
+    """
     if not auth.is_authenticated():
         return _needs_account()
     r = await _backend_get(request, "/backend-api/files/download/" + file_id)
@@ -2094,7 +2118,66 @@ async def library_download(file_id: str, request: Request):
         return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
                             content={"error": {"type": "download_error", "detail": detail}})
     d = r.json()
-    return {"file_id": file_id, "download_url": d.get("download_url"), "status": d.get("status")}
+    durl = d.get("download_url")
+    if url:
+        return {"file_id": file_id, "download_url": durl, "status": d.get("status")}
+    if not durl:
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "no download_url", "type": "upstream_error"}})
+
+    token = auth.access_token()
+    async with _httpx.AsyncClient(timeout=90.0, follow_redirects=True) as c:
+        fr = await c.get(durl, headers={"Authorization": "Bearer " + token})
+    if fr.status_code != 200:
+        return JSONResponse(status_code=fr.status_code, content={"error": {
+            "message": "no se pudo descargar el archivo", "type": "upstream_error"}})
+    headers = {}
+    cd = fr.headers.get("content-disposition")
+    if cd:
+        headers["Content-Disposition"] = cd
+    return Response(content=fr.content,
+                    media_type=fr.headers.get("content-type", "application/octet-stream"),
+                    headers=headers)
+
+
+@app.delete("/v1/library/trash")
+async def library_empty_trash(request: Request):
+    """Empty the library trash -- PERMANENTLY deletes trashed files and frees the
+    space. Irreversible. (Soft-delete first with DELETE /v1/library/{library_id}.)"""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_request(request, "DELETE", "/backend-api/files/library/trash")
+    if r.status_code not in (200, 204):
+        return JSONResponse(status_code=r.status_code, content={"error": {
+            "type": "trash_error", "detail": r.text[:200]}})
+    return {"success": True}
+
+
+@app.delete("/v1/library/{library_id}")
+async def library_delete(library_id: str, request: Request):
+    """Move a library file to trash (recoverable). Takes the `library_id`
+    (libfile_...). Frees space only after emptying the trash."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_request(request, "DELETE",
+                               "/backend-api/files/library/files/" + library_id)
+    if r.status_code not in (200, 204):
+        return JSONResponse(status_code=r.status_code, content={"error": {
+            "type": "delete_error", "detail": r.text[:200]}})
+    return {"success": True, "library_id": library_id, "trashed": True}
+
+
+@app.post("/v1/library/{library_id}/restore")
+async def library_restore(library_id: str, request: Request):
+    """Restore a trashed library file. Takes the `library_id` (libfile_...)."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_request(request, "POST",
+                               "/backend-api/files/library/files/" + library_id + "/restore")
+    if r.status_code not in (200, 204) or not r.text.strip():
+        return JSONResponse(status_code=r.status_code if r.status_code not in (200, 204) else 502,
+                            content={"error": {"type": "restore_error", "detail": r.text[:200]}})
+    return r.json()
 
 
 @app.get("/v1/conversations")
