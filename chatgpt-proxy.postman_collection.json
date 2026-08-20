@@ -878,6 +878,41 @@
             }
           ],
           "response": []
+        },
+        {
+          "name": "Transcriptions (STT)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/audio/transcriptions",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "model",
+                  "value": "whisper-1",
+                  "type": "text"
+                }
+              ]
+            },
+            "description": "Speech-to-text. Subí un audio en 'file'."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ]
     },

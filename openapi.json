@@ -1548,6 +1548,74 @@
           }
         }
       }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "summary": "Transcriptions (STT)",
+        "operationId": "transcriptions",
+        "tags": [
+          "Audio"
+        ],
+        "description": "Speech-to-text (Whisper), OpenAI-compatible. Multipart: file=audio (el content-type debe matchear los bytes; mp3 verificado). Devuelve {text}. Autenticado.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": "whisper-1"
+                  },
+                  "language": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "default": "json",
+                    "enum": [
+                      "json",
+                      "text"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transcripción",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "audio vacío"
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1639,7 +1707,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Nombre de la función. Controla qué modo se activa en el backend:\n- `web_search` / `search` / `brave_search` / `bing_search` / `google_search` → `force_use_search=true`\n- `chatgpt_tools` / `all_tools` / `builtin_tools` → `force_use_tools=true`\n- Cualquier otro nombre → `force_use_tools=true`"
+            "description": "Nombre de la función. El backend **no ejecuta funciones del cliente** — sus tools corren del lado servidor y nunca devuelve `tool_calls`. El nombre solo elige qué modo activar, usando los mismos nombres que upstream reporta en `enabled_tools` de cada modelo:\n- `web_search`, `search`, `brave_search`, `bing_search`, `google_search` → `force_use_search = true`\n- `canvas`, `text_editor` → `force_use_canvas = true`\n- `tools`, `tools2`, `app_pairing`, `chatgpt_tools`, `all_tools`, `builtin_tools` → `force_use_tools = true`\n- cualquier otro nombre → `force_use_tools = true`"
           },
           "description": {
             "type": "string"
@@ -1751,30 +1819,83 @@
             "description": "**Extensión propia.** Activa el modo Canvas del backend anónimo. El modelo responde con un documento estructurado en formato MDX:\n\n```\n:::writing{variant=\"document\" id=\"uuid\" title=\"Título del doc\"}\nContenido del documento en Markdown\n:::\n```\n\nCompatible con todos los modelos anónimos. No combinar con `force_use_search` o `force_use_tools`.",
             "example": true
           },
+          "response_format": {
+            "type": "object",
+            "nullable": true,
+            "description": "`{\"type\":\"json_object\"}` fuerza modo JSON. Implementado mediante una instrucción antepuesta al prompt — el backend no tiene un campo `response_format` propio."
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "standard",
+              "medium",
+              "default",
+              "extended",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "description": "Vocabulario de OpenAI, plegado sobre los tres valores que acepta el backend: `none`/`minimal`/`low` → `standard`, `medium`/`default` → `extended`, `high`/`xhigh` → `max`. Un valor fuera de la lista devuelve **400** desde el proxy, sin gastar petición upstream."
+          },
+          "thinking_effort": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "standard",
+              "extended",
+              "max"
+            ],
+            "description": "Forma nativa del campo anterior; tiene prioridad si se envían ambos. En modo anónimo `/v1/models` reporta `configurable_thinking_effort: false` para todos los modelos, así que el valor viaja pero puede no cambiar la respuesta."
+          },
+          "service_tier": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "auto",
+              "default",
+              "standard",
+              "flex",
+              "scale",
+              "priority"
+            ],
+            "description": "Clase de scheduling upstream. `auto`/`default`/`flex`/`scale` → `standard`; `priority` pasa tal cual. Un valor fuera de la lista devuelve **400**. Se refleja en `service_tier` de la respuesta."
+          },
+          "force_disable_features": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "**Extensión propia.** Nombres de features a desactivar en este turno. El backend no los valida: los nombres desconocidos se ignoran."
+          },
           "temperature": {
             "type": "number",
             "nullable": true,
-            "description": "Ignorada — incluida por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "max_tokens": {
             "type": "integer",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "top_p": {
             "type": "number",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "presence_penalty": {
             "type": "number",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "frequency_penalty": {
             "type": "number",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "stop": {
             "oneOf": [
@@ -1789,17 +1910,17 @@
               }
             ],
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "seed": {
             "type": "integer",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           },
           "n": {
             "type": "integer",
             "nullable": true,
-            "description": "Ignorado — incluido por compatibilidad con OpenAI."
+            "description": "**Aceptado y descartado.** El protocolo de conversación de ChatGPT no tiene este campo: el DTO de petición del cliente Android no incluye ningún parámetro de sampling. Se acepta para no romper clientes OpenAI estándar y se descarta. Las respuestas a peticiones que lo lleven incluyen la cabecera `X-Proxy-Ignored-Params` con la lista de campos descartados. Los controles de generación que sí existen son `reasoning_effort`/`thinking_effort` y `service_tier`."
           }
         }
       }
