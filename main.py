@@ -1430,6 +1430,40 @@ async def list_models():
                 **_BLANK_CAPS,
             })
 
+    # --- capability contract: per-model metadata -----------------------------
+    # The provider-level block on /health cannot say that gpt-image-1 draws and
+    # does not chat, or that the two -t-mini models carry 5x the context of the
+    # rest. Those are the three things that genuinely vary per model, plus the
+    # sizes. A per-model value may only NARROW the provider-level one -- claiming
+    # a capability the account does not have would be a lie with a smaller blast
+    # radius, not a smaller lie.
+    #
+    # `context_window` is already set above from the vendor's `max_tokens`, and
+    # is None for the aliases and the image models (which get _BLANK_CAPS). The
+    # default below is a floor for exactly those, not a replacement for a real
+    # value.
+    _DEFAULT_CONTEXT = 52815          # what the vendor reports for this family
+    _DEFAULT_MAX_OUTPUT = 8192
+
+    # capabilities.snapshot() is synchronous and, on a cache miss, blocks on a
+    # vendor round trip behind a threading.Lock -- offloaded to a worker thread
+    # for the same reason /health does (see the comment there): awaiting it
+    # directly would stall this process's single asyncio event loop.
+    state = await asyncio.to_thread(capabilities.snapshot)
+    provider_level = capabilities.effective(state)
+    for entry in data:
+        draws = entry["id"] in _IMAGE_MODELS
+        entry["context_window"] = int(entry.get("context_window") or _DEFAULT_CONTEXT)
+        entry["max_output_tokens"] = 0 if draws else _DEFAULT_MAX_OUTPUT
+        entry["capabilities"] = {
+            # `and provider_level[...]` IS the narrowing rule, applied at the
+            # source: on an anonymous session or a free plan these come back
+            # False no matter what the model would be capable of.
+            "tools":  (not draws) and provider_level["tools"],
+            "vision": (not draws) and provider_level["vision"],
+            "images": draws and provider_level["images"],
+        }
+
     return {"object": "list", "data": data}
 
 # ---------------------------------------------------------------------------
