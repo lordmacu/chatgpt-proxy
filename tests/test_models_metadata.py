@@ -48,14 +48,54 @@ def test_every_model_carries_per_model_capabilities(monkeypatch):
         assert all(isinstance(v, bool) for v in m["capabilities"].values())
 
 
-def test_a_per_model_capability_is_never_wider_than_the_provider_level_one(monkeypatch):
-    # The contract's narrowing rule: on a free plan nothing may claim images.
-    state = cap.AccountState(mode="account", plan="free")
+def _assert_narrowing_holds(monkeypatch, state):
     provider_level = cap.effective(state)
     for m in _models(monkeypatch, state):
         for name in PER_MODEL:
             assert not (m["capabilities"][name] and not provider_level[name]), \
                 f"{m['id']} claims {name} while the provider reports it false"
+
+
+def test_a_per_model_capability_is_never_wider_than_the_provider_level_one__on_a_free_plan(monkeypatch):
+    # The contract's narrowing rule: on a free plan nothing may claim images.
+    # `images` is the only key this state can catch a violation on -- `vision`
+    # and `tools` are both True for a free account, so an entry claiming
+    # either would not trip `not provider_level[name]` here. See the two
+    # cases below for those.
+    _assert_narrowing_holds(monkeypatch, cap.AccountState(mode="account", plan="free"))
+
+
+def test_a_per_model_capability_is_never_wider_than_the_provider_level_one__anonymous(monkeypatch):
+    # `vision` is gated on `mode == "account"` (capabilities.effective), so it
+    # is False for an anonymous session -- this is the state that lets the
+    # invariant catch a violation on that key specifically.
+    _assert_narrowing_holds(monkeypatch, cap.AccountState(mode="anonymous"))
+
+
+def test_a_per_model_capability_is_never_wider_than_the_provider_level_one__emulation_off(monkeypatch):
+    # `tools` tracks tool_calls.EMULATION_ENABLED, not AccountState at all (see
+    # capabilities.effective) -- no plan or mode can make it False, so this is
+    # the only state that lets the invariant catch a violation on that key.
+    monkeypatch.setattr(cap.tool_calls, "EMULATION_ENABLED", False)
+    _assert_narrowing_holds(monkeypatch, GO)
+
+
+def test_an_image_model_never_reports_tools_or_vision(monkeypatch):
+    # Stated directly rather than inferred from the narrowing inequality above:
+    # on a paid account with emulation on, provider-level `tools` and `vision`
+    # are both True, so a non-drawing model legitimately inherits them. An
+    # image model must still report False for both -- that is the
+    # `(not draws) and` guard in main.py, asserted as itself instead of via an
+    # inequality that only bites when the provider-level value is already
+    # False. This is the test that catches an edit that drops that guard.
+    monkeypatch.setattr(cap.tool_calls, "EMULATION_ENABLED", True)
+    provider_level = cap.effective(GO)
+    assert provider_level["tools"] is True
+    assert provider_level["vision"] is True
+    for m in _models(monkeypatch, GO):
+        if m["id"] in main._IMAGE_MODELS:
+            assert m["capabilities"]["tools"] is False
+            assert m["capabilities"]["vision"] is False
 
 
 def test_only_the_image_models_claim_images(monkeypatch):
