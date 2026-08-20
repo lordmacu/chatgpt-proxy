@@ -2033,6 +2033,70 @@ async def transcriptions(
     return {"text": text}
 
 
+@app.get("/v1/library")
+async def library(request: Request, limit: int = 50, cursor: str = None):
+    """List your file library (uploaded + generated files). Authenticated.
+
+    Proxies /backend-api/files/library/nodes. `limit`/`cursor` paginate.
+    Each item's `id` is the usable file_id (for /v1/library/{id}/download).
+    """
+    if not auth.is_authenticated():
+        return _needs_account()
+    params = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+    r = await _backend_get(request, "/backend-api/files/library/nodes", params)
+    if r.status_code != 200 or not r.text.strip():
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "el backend no devolvió datos (transitorio) -- reintentá",
+            "type": "upstream_error"}})
+    d = r.json()
+    items = [{
+        "id":            it.get("file_id"),
+        "library_id":    it.get("id"),
+        "name":          it.get("name"),
+        "kind":          it.get("kind"),
+        "mime_type":     it.get("mime_type"),
+        "size_bytes":    it.get("file_size_bytes"),
+        "category":      it.get("library_file_category"),
+        "state":         it.get("state"),
+        "thumbnail_url": it.get("thumbnail_url"),
+        "updated_at":    it.get("updated_at"),
+        "directory_id":  it.get("parent_directory_id"),
+    } for it in d.get("items", [])]
+    return {"items": items, "cursor": d.get("cursor")}
+
+
+@app.get("/v1/library/usage")
+async def library_usage(request: Request):
+    """Library storage usage: used/allowed bytes + breakdown by file type."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/files/library/storage/usage")
+    if r.status_code != 200 or not r.text.strip():
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "el backend no devolvió datos (transitorio) -- reintentá",
+            "type": "upstream_error"}})
+    return r.json()
+
+
+@app.get("/v1/library/{file_id}/download")
+async def library_download(file_id: str, request: Request):
+    """Get a presigned download URL for a library file."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/files/download/" + file_id)
+    if r.status_code != 200 or not r.text.strip():
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200] or "sin cuerpo"}
+        return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
+                            content={"error": {"type": "download_error", "detail": detail}})
+    d = r.json()
+    return {"file_id": file_id, "download_url": d.get("download_url"), "status": d.get("status")}
+
+
 @app.get("/v1/conversations")
 async def conversations(request: Request):
     """List the account's conversation history, most recent first.
