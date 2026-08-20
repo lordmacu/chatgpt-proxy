@@ -670,6 +670,41 @@
               }
             }
           ]
+        },
+        {
+          "name": "Chat with Web Search",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\": \"auto\", \"web_search\": true, \"stream\": false, \"messages\": [{\"role\": \"user\", \"content\": \"¿Qué pasó hoy en las noticias de tecnología?\"}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Fuerza búsqueda web. La respuesta trae search_metadata con las fuentes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OK',()=>pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ]
     },
