@@ -9,3 +9,4 @@ dpop_key.pem
 session_cookies.json
 coolify-session.env
 relay.log
+.relay_state.json
