@@ -10,8 +10,17 @@ import httpx
 import auth
 
 # ---------------------------------------------------------------------------
-# Image download cache — persisted to disk so container restarts don't refetch
+# Image storage: downloaded locally so URLs don't expire and need no auth.
+# IMAGE_BASE_URL   — the URL at which THIS proxy is reachable from outside
+#                    (e.g. http://10.0.1.1:8890). Set in Coolify env vars.
+#                    When empty the presigned remote URL is used as fallback.
+# IMAGE_STORE_DIR  — local directory where images are saved inside the container.
 # ---------------------------------------------------------------------------
+_IMAGE_BASE_URL  = os.environ.get("IMAGE_BASE_URL", "").rstrip("/")
+_IMAGE_STORE_DIR = pathlib.Path(os.environ.get("IMAGE_STORE_DIR", "/tmp/chatgpt_images"))
+
+# Cache: file_id → {url (remote presigned), file_name, size_bytes, local_filename?}
+# Persisted to avoid calling /backend-api/files/{id}/download more than once.
 _IMAGE_CACHE_FILE = pathlib.Path("/tmp/chatgpt_image_cache.json")
 _image_cache_mem: dict = {}
 
@@ -686,45 +695,103 @@ class ChatGPTSession:
                 _log(f"[img] queued {fid[:28]}")
 
     async def resolve_image_urls(self) -> None:
-        """Resolve pending image file IDs to signed download URLs.
+        """Resolve pending image file IDs → download bytes locally → stable URL.
 
-        Results are cached to _IMAGE_CACHE_FILE so the download-metadata endpoint
-        is only called once per unique file ID across all container restarts.
-        The auth token is taken from the auth module (same as _base_headers).
+        Two-step:
+          1. GET /backend-api/files/{id}/download (auth required) → presigned URL.
+             Cached in _IMAGE_CACHE_FILE so the metadata endpoint is only called once.
+          2. GET presigned URL with auth headers → save PNG/JPEG bytes to
+             _IMAGE_STORE_DIR.  Serve via /images/{filename} on this proxy.
+             Returns IMAGE_BASE_URL/images/{filename} when IMAGE_BASE_URL is set,
+             otherwise falls back to the presigned remote URL.
         """
         if not self._pending_image_ids:
             return
+        _IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
         cache = _image_cache_load()
-        hdrs = {**_base_headers(self.device_id)}
+        hdrs  = {**_base_headers(self.device_id)}
 
         for fid in self._pending_image_ids:
-            if fid in cache:
-                _log(f"[img-cache] HIT {fid[:28]}")
-                self.last_images.append(cache[fid])
-                continue
             try:
-                r = await self.client.get(
-                    f"{BASE}/backend-api/files/{fid}/download",
-                    headers=hdrs,
-                    timeout=20.0,
-                )
-                _log(f"[img] /files/{fid[:20]}.../download → HTTP {r.status_code}")
-                if r.status_code == 200:
-                    data = r.json()
-                    entry = {
-                        "file_id":    fid,
-                        "url":        data.get("download_url", ""),
-                        "file_name":  data.get("file_name", "generated_image.png"),
-                        "size_bytes": data.get("file_size_bytes", 0),
-                    }
-                    _image_cache_mem[fid] = entry
-                    _image_cache_save()
-                    self.last_images.append(entry)
-                    _log(f"[img] saved → {entry['url'][:80]}")
+                # ── Step 1: get the presigned remote URL ──────────────────────
+                if fid in cache:
+                    remote_url  = cache[fid]["url"]
+                    file_name   = cache[fid].get("file_name", "generated_image.png")
+                    size_bytes  = cache[fid].get("size_bytes", 0)
+                    _log(f"[img-cache] HIT metadata {fid[:28]}")
                 else:
-                    _log(f"[img] resolve failed HTTP {r.status_code}: {r.text[:120]}")
+                    r = await self.client.get(
+                        f"{BASE}/backend-api/files/{fid}/download",
+                        headers=hdrs, timeout=20.0,
+                    )
+                    _log(f"[img] /files/{fid[:20]}.../download → HTTP {r.status_code}")
+                    if r.status_code != 200:
+                        _log(f"[img] resolve failed: {r.text[:120]}")
+                        continue
+                    d          = r.json()
+                    remote_url = d.get("download_url", "")
+                    file_name  = d.get("file_name", "generated_image.png")
+                    size_bytes = d.get("file_size_bytes", 0)
+                    cache[fid] = {"url": remote_url, "file_name": file_name,
+                                  "size_bytes": size_bytes}
+                    _image_cache_mem[fid] = cache[fid]
+                    _image_cache_save()
+
+                if not remote_url:
+                    _log(f"[img] empty remote_url for {fid[:28]}")
+                    continue
+
+                # ── Step 2: download bytes and store locally ──────────────────
+                local_filename = cache[fid].get("local_filename", "")
+                local_path     = (_IMAGE_STORE_DIR / local_filename
+                                  if local_filename else None)
+
+                if local_filename and local_path and local_path.exists():
+                    _log(f"[img-cache] HIT local {local_filename}")
+                else:
+                    img_r = await self.client.get(
+                        remote_url, headers=hdrs, timeout=60.0,
+                        follow_redirects=True,
+                    )
+                    _log(f"[img] download bytes → HTTP {img_r.status_code} "
+                         f"({len(img_r.content)} B)")
+                    if img_r.status_code != 200:
+                        _log(f"[img] byte download failed: {img_r.text[:80]}")
+                        # Fallback: use the remote URL as-is
+                        self.last_images.append({
+                            "file_id": fid, "url": remote_url,
+                            "file_name": file_name, "size_bytes": size_bytes,
+                        })
+                        continue
+
+                    ct  = img_r.headers.get("content-type", "").split(";")[0].strip()
+                    ext = ({"image/png": ".png", "image/jpeg": ".jpg",
+                            "image/webp": ".webp", "image/gif": ".gif"}
+                           .get(ct) or pathlib.Path(file_name).suffix or ".png")
+                    local_filename = f"{fid[:32]}{ext}"
+                    local_path     = _IMAGE_STORE_DIR / local_filename
+                    local_path.write_bytes(img_r.content)
+                    _log(f"[img] saved {len(img_r.content)} B → {local_filename}")
+                    # Update cache entry with local filename
+                    _image_cache_mem[fid]["local_filename"] = local_filename
+                    _image_cache_save()
+
+                # ── Build the URL this proxy will serve ───────────────────────
+                if _IMAGE_BASE_URL:
+                    served_url = f"{_IMAGE_BASE_URL}/images/{local_filename}"
+                else:
+                    served_url = remote_url   # fallback when env var not set
+
+                self.last_images.append({
+                    "file_id":    fid,
+                    "url":        served_url,
+                    "file_name":  file_name,
+                    "size_bytes": size_bytes,
+                })
+                _log(f"[img] → {served_url[:90]}")
+
             except Exception as e:
-                _log(f"[img] resolve error for {fid[:28]}: {e}")
+                _log(f"[img] error for {fid[:28]}: {e}")
 
         self._pending_image_ids.clear()
 
