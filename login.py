@@ -82,6 +82,10 @@ HEADERS_BASE = {
     "User-Agent": f"ChatGPT/{APP_VERSION} (Android 16; sdk_gphone64_arm64; build 2622307)",
     "OAI-Package-Name": "com.openai.chatgpt",
     "OAI-Client-Type": "android",
+    # The app's auth interceptor (decompiled `gfj`/`ym50`) puts OAI-Device-Id on
+    # EVERY request to auth.openai.com, not just as the `android_device_id` query
+    # param below. Same value in both places, matching the app.
+    "OAI-Device-Id": DEVICE_ID,
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
 }
