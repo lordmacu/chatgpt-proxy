@@ -1039,6 +1039,49 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Library",
+      "item": [
+        {
+          "name": "List Library",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/library?limit=50",
+            "description": "Tus archivos."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OK',()=>pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Library Usage",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/library/usage",
+            "description": "Storage."
+          },
+          "response": []
+        },
+        {
+          "name": "Library Download",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/library/{{file_id}}/download",
+            "description": "URL de descarga."
+          },
+          "response": []
+        }
+      ]
     }
   ]
 }

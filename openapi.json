@@ -1616,6 +1616,185 @@
           }
         }
       }
+    },
+    "/v1/library": {
+      "get": {
+        "summary": "List Library",
+        "operationId": "library",
+        "tags": [
+          "Library"
+        ],
+        "description": "Tu biblioteca de archivos (subidos + generados). Autenticado. El id de cada item es el file_id.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archivos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "file_id (usar en /download)"
+                          },
+                          "library_id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "mime_type": {
+                            "type": "string"
+                          },
+                          "size_bytes": {
+                            "type": "integer"
+                          },
+                          "category": {
+                            "type": "string",
+                            "example": "image"
+                          },
+                          "state": {
+                            "type": "string"
+                          },
+                          "thumbnail_url": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          },
+                          "directory_id": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "cursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/library/usage": {
+      "get": {
+        "summary": "Library Usage",
+        "operationId": "library_usage",
+        "tags": [
+          "Library"
+        ],
+        "description": "Uso de storage: used/allowed bytes + breakdown por tipo.",
+        "responses": {
+          "200": {
+            "description": "Storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "plan_type": {
+                      "type": "string"
+                    },
+                    "used_bytes": {
+                      "type": "integer"
+                    },
+                    "allowed_bytes": {
+                      "type": "integer"
+                    },
+                    "remaining_bytes": {
+                      "type": "integer"
+                    },
+                    "breakdown_by_file_type": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/library/{file_id}/download": {
+      "get": {
+        "summary": "Library Download URL",
+        "operationId": "library_download",
+        "tags": [
+          "Library"
+        ],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "URL presignada de descarga de un archivo de la biblioteca.",
+        "responses": {
+          "200": {
+            "description": "URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "file_id": {
+                      "type": "string"
+                    },
+                    "download_url": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
     }
   },
   "components": {
