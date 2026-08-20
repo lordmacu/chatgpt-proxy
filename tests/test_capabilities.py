@@ -48,11 +48,28 @@ def test_an_expired_paid_plan_loses_images():
     assert cap.effective(lapsed)["images"] is False
 
 
-def test_tools_is_false_on_every_plan():
-    # No function calling on any backend: measured 0/3, twice, with
-    # tool_choice:"required" returning tool_calls:None and prose.
+def test_tools_follows_emulation_enabled_on_every_plan():
+    # There is no native function calling on any backend -- with
+    # tool_choice:"required" the backend returns tool_calls:None and prose,
+    # measured 0/3, twice. But /v1/chat/completions EMULATES it (tool_calls.py)
+    # and returns real tool_calls with finish_reason "tool_calls", streaming
+    # included, regardless of account or plan. The contract promises what a
+    # request achieves, not how, so `tools` tracks the emulation switch, not
+    # the account state.
+    for state in (GO, FREE, ANON):
+        assert cap.effective(state)["tools"] == cap.tool_calls.EMULATION_ENABLED
+
+
+def test_tools_is_false_when_emulation_is_disabled(monkeypatch):
+    monkeypatch.setattr(cap.tool_calls, "EMULATION_ENABLED", False)
     for state in (GO, FREE, ANON):
         assert cap.effective(state)["tools"] is False
+
+
+def test_tools_is_true_when_emulation_is_enabled(monkeypatch):
+    monkeypatch.setattr(cap.tool_calls, "EMULATION_ENABLED", True)
+    for state in (GO, FREE, ANON):
+        assert cap.effective(state)["tools"] is True
 
 
 def test_snapshot_is_cached_and_does_not_refetch_within_the_interval():

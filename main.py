@@ -112,6 +112,7 @@ from chatgpt_client import (
 import httpx as _httpx
 
 import auth
+import capabilities
 import tool_calls as _tc
 
 # ---------------------------------------------------------------------------
@@ -2054,37 +2055,30 @@ async def serve_image(filename: str):
 async def health():
     total_sessions = sum(len(p._pool) for p in _pools.values())
     total_files    = sum(len(uf) for uf in _files.values())
+    state = capabilities.snapshot()
     return {
-        "status":               "ok",
-        "version":              "2.4.0",
-        # Which backend this process is actually talking to. Without it the two
-        # modes are indistinguishable from outside, and "anonymous" is the one
-        # that silently lacks vision, image generation and function calling --
-        # so a deployment whose token failed to load looks perfectly healthy
-        # while quietly serving a weaker backend.
-        "auth_mode":            "account" if auth.is_authenticated() else "anonymous",
-        "active_users":         len(_pools),
-        "total_sessions":       total_sessions,
+        "status":  "ok",
+        "version": "2.5.0",
+        # The capability contract (llm-libre spec 2026-08-20). Everything under
+        # `capabilities` is EFFECTIVE: already resolved against this account and
+        # its plan, so the gateway reads one boolean instead of learning what a
+        # ChatGPT plan is. See capabilities.effective.
+        "contract": 1,
+        "provider": "chatgpt",
+        "auth": {
+            "mode":                state.mode,
+            "plan":                state.plan,
+            "subscription_active": state.subscription_active,
+            "expires_at":          state.expires_at,
+        },
+        "capabilities": capabilities.effective(state),
+        # Kept for compatibility: Coolify's container health check and the
+        # existing dashboards read these, and the contract is additive.
+        # `auth_mode` was the only machine-readable field the old block had.
+        "auth_mode":             state.mode,
+        "active_users":          len(_pools),
+        "total_sessions":        total_sessions,
         "total_files_in_memory": total_files,
-        "anonymous_models": [
-            "gpt-5-6", "gpt-5-5", "gpt-5-6-mini", "gpt-5-5-mini", "gpt-5-3-mini", "auto"
-        ],
-        "capabilities": {
-            "text_chat":        True,
-            "streaming":        True,
-            "multi_turn":       True,
-            "system_prompt":    True,
-            "file_attachments": True,
-            "multi_user":       True,
-            "json_mode":        "response_format: {type: json_object}",
-            "quota_handling":   "auto-recycles device_id on 429/403, transparent retry",
-            "image_input":      False,
-            "image_generation": "DALL-E via /v1/images/generations and chat completions (requires account)",
-            "web_search":       "automatic (override with web_search: true/false)",
-            "force_use_tools":  "optional (enables advanced tools + genui widgets)",
-            "force_use_canvas": "optional (enables Canvas / document mode)",
-            "voice":            False,
-        }
     }
 
 

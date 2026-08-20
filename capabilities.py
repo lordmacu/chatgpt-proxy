@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass
 
 import auth
+import tool_calls
 
 log = logging.getLogger(__name__)
 
@@ -87,11 +88,14 @@ def effective(state: AccountState) -> dict:
       - anonymous reaches 5 of 14 endpoints; `synthesize`, `library`, `gizmos`
         and the file APIs have no /backend-anon variant at all, so everything
         that needs one is False.
-      - `tools` is False on EVERY plan: with tool_choice:"required" the backend
-        returns tool_calls:None and prose. Measured 0/3, twice. This is the one
-        boolean that does not vary, and claiming it would make the gateway route
-        agentic traffic here and receive prose -- a silent failure, where a
-        refusal would at least fail over.
+      - `tools` follows `tool_calls.EMULATION_ENABLED`. Native function calling
+        does not exist on any backend -- with tool_choice:"required" the
+        backend returns tool_calls:None and prose, measured 0/3, twice -- but
+        /v1/chat/completions emulates it (see tool_calls.py) and returns real
+        `tool_calls` with finish_reason "tool_calls", streaming included. The
+        contract promises what a request ACHIEVES, not how, so this reports
+        True whenever that emulation is on and False only when the operator
+        disables it with TOOL_EMULATION=0.
       - `images` needs a paid plan. On free the tool IS invoked and returns
         empty; that is a plan block, not a transient failure.
       - `translate` and `search` work anonymously: /v1/translate does not even
@@ -101,7 +105,13 @@ def effective(state: AccountState) -> dict:
     return {
         "chat":                True,
         "streaming":           True,
-        "tools":               False,
+        # Custom function calling is EMULATED (see tool_calls.py) rather than
+        # native, and the contract does not care: it promises what a request
+        # achieves, not how. What matters is that /v1/chat/completions returns
+        # real `tool_calls` with finish_reason "tool_calls" -- and it stops
+        # doing so when the operator sets TOOL_EMULATION=0, which is exactly
+        # when this must report False.
+        "tools":               tool_calls.EMULATION_ENABLED,
         "vision":              account,
         "images":              _paid(state),
         "audio_speech":        account,
@@ -153,11 +163,36 @@ def reset() -> None:
 
 
 def _resolve_from_vendor() -> AccountState:
-    """Ask ChatGPT what this token's account is. Wired in Task 3.
+    """Ask ChatGPT what this token's account is.
+
+    Synchronous and blocking on purpose: it runs at most once an hour, behind
+    `snapshot`'s lock, and making it async would push an event loop requirement
+    into every caller of a function that is meant to be trivially callable.
 
     Kept separate from `snapshot` so the caching rules can be tested without a
-    network, and so the vendor call has exactly one home.
+    network, and so the vendor call has exactly one home. Carries its own
+    timeout: this runs under `snapshot`'s lock, so a hung request here would
+    otherwise block every concurrent /health caller indefinitely.
     """
     if not auth.is_authenticated():
         return AccountState(mode="anonymous")
-    return AccountState(mode="account")
+    import httpx
+    r = httpx.get(
+        "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+        params={"timezone_offset_min": "0"},
+        headers={"Authorization": "Bearer " + auth.access_token(),
+                 "User-Agent": "chatgpt-proxy/capabilities",
+                 "Accept": "application/json"},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    accounts = (r.json().get("accounts") or {})
+    account = accounts.get("default") or next(iter(accounts.values()), {}) or {}
+    entitlement = account.get("entitlement") or {}
+    inner = account.get("account") or {}
+    return AccountState(
+        mode="account",
+        plan=inner.get("plan_type"),
+        subscription_active=bool(entitlement.get("has_active_subscription")),
+        expires_at=entitlement.get("expires_at"),
+    )
