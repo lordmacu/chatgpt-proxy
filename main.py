@@ -1537,3 +1537,63 @@ async def session_me(request: Request):
     finally:
         if owns_client:
             await client.aclose()
+
+
+@app.get("/v1/account")
+async def account(request: Request):
+    """The authenticated account's plan, subscription and enabled features.
+
+    Proxies /backend-api/accounts/check and returns a clean summary. Requires an
+    account (CHATGPT_ACCESS_TOKEN); anonymous sessions have no account to report.
+    """
+    if not auth.is_authenticated():
+        return JSONResponse(
+            status_code=401,
+            content={"error": {
+                "message": "This endpoint needs an authenticated account "
+                           "(set CHATGPT_ACCESS_TOKEN).",
+                "type": "auth_error"}},
+        )
+
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns_client = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
+
+    path = "/backend-api/accounts/check/v4-2023-04-27"
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        r = await client.get(f"{BASE}{path}",
+                             params={"timezone_offset_min": "0"}, headers=hdrs)
+        r.raise_for_status()
+        data = r.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    accts = data.get("accounts", {}) or {}
+    acc   = accts.get("default") or next(iter(accts.values()), {}) or {}
+    a     = acc.get("account", {}) or {}
+    ent   = acc.get("entitlement", {}) or {}
+    feats = acc.get("features", []) or []
+    return {
+        "account_id":     a.get("account_id"),
+        "name":           a.get("name"),
+        "plan_type":      a.get("plan_type"),
+        "is_deactivated": a.get("is_deactivated"),
+        "subscription": {
+            "plan":             ent.get("subscription_plan"),
+            "active":           ent.get("has_active_subscription"),
+            "expires_at":       ent.get("expires_at"),
+            "renews_at":        ent.get("renews_at"),
+            "cancels_at":       ent.get("cancels_at"),
+            "billing_period":   ent.get("billing_period"),
+            "billing_currency": ent.get("billing_currency"),
+            "is_delinquent":    ent.get("is_delinquent"),
+        },
+        "features": feats,
+    }
