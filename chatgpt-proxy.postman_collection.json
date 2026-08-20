@@ -880,6 +880,90 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Gizmos",
+      "item": [
+        {
+          "name": "List Gizmos",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/gizmos",
+            "description": "Lista tus GPTs. Usá el id como model del chat.",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('Has gizmos', function(){ pm.expect(pm.response.json()).to.have.property('gizmos'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Gizmo",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/gizmos/{{gizmo_id}}",
+            "description": "Detalle de un GPT.",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Chat as Gizmo",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\": \"{{gizmo_id}}\", \"messages\": [{\"role\": \"user\", \"content\": \"hola\"}], \"stream\": false}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Chatear COMO un GPT: model = id del gizmo (g-...).",
+            "header_note": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     }
   ]
 }

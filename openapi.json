@@ -341,7 +341,7 @@
     "/v1/chat/completions": {
       "post": {
         "summary": "Chat Completions",
-        "description": "Endpoint principal de chat, compatible con la API de OpenAI.\n\n## Características\n\n- **Modelos**: `gpt-5-6`, `gpt-5-5`, `gpt-5-6-mini`, `gpt-5-5-mini`, `gpt-5-3-mini`, `auto` (y aliases legacy)\n- **Streaming**: pasar `stream: true` para recibir SSE\n- **System prompt**: mensajes con `role: \"system\"` son inyectados en el primer turno\n- **Multi-turno**: las sesiones se mantienen por 30 min. El historial del array `messages` enruta a la sesión correcta\n- **Archivos**: referencias a `file_id` en el content multipart se inyectan como texto\n- **Web search**: controlable con `web_search: true/false/null` (o usando `tools` con `web_search` tool)\n- **Tools avanzados**: `force_use_tools: true` activa reservas, shopping, widgets en el backend\n- **Canvas**: `force_use_canvas: true` activa modo documento — la respuesta incluye bloques `:::writing{variant=\"document\" id=\"...\" title=\"...\"}`\n- **Compatibilidad `tools` OpenAI**: el array `tools` se acepta y los nombres de función se mapean a flags del backend\n\n## ⚠️ Limitación importante: no hay `tool_calls` en la respuesta\n\nEl backend anónimo de ChatGPT Android **no expone llamadas a herramientas** en formato OpenAI. Las tools se usan internamente y el resultado llega integrado en `choices[0].message.content` (texto). El campo `tools` en el request sirve solo para activar el modo correcto en el backend, no para function-calling clásico.\n\n## Limitaciones adicionales\n\n- `image_url` en el content devuelve error 400 (vision no disponible en anónimo)\n- No hay generación de imágenes\n\n\n## Eventos SSE extra (solo con `stream: true`)\n\nDespués del último chunk y antes de `[DONE]`, el proxy puede emitir:\n\n| Evento | Cuándo | Datos |\n|--------|--------|-------|\n| `event: search_metadata` | Si hubo búsqueda web | `{queries, sources, title}` |\n| `event: widgets` | Si el modelo generó widgets genui | `[{name, data}]` |\n\nClientes OpenAI estándar que no reconocen estos eventos los ignoran automáticamente.",
+        "description": "Endpoint principal de chat, compatible con la API de OpenAI.\n\n## Características\n\n- **Modelos**: `gpt-5-6`, `gpt-5-5`, `gpt-5-6-mini`, `gpt-5-5-mini`, `gpt-5-3-mini`, `auto` (y aliases legacy)\n- **Streaming**: pasar `stream: true` para recibir SSE\n- **System prompt**: mensajes con `role: \"system\"` son inyectados en el primer turno\n- **Multi-turno**: las sesiones se mantienen por 30 min. El historial del array `messages` enruta a la sesión correcta\n- **Archivos**: referencias a `file_id` en el content multipart se inyectan como texto\n- **Web search**: controlable con `web_search: true/false/null` (o usando `tools` con `web_search` tool)\n- **Tools avanzados**: `force_use_tools: true` activa reservas, shopping, widgets en el backend\n- **Canvas**: `force_use_canvas: true` activa modo documento — la respuesta incluye bloques `:::writing{variant=\"document\" id=\"...\" title=\"...\"}`\n- **Compatibilidad `tools` OpenAI**: el array `tools` se acepta y los nombres de función se mapean a flags del backend\n\n## ⚠️ Limitación importante: no hay `tool_calls` en la respuesta\n\nEl backend anónimo de ChatGPT Android **no expone llamadas a herramientas** en formato OpenAI. Las tools se usan internamente y el resultado llega integrado en `choices[0].message.content` (texto). El campo `tools` en el request sirve solo para activar el modo correcto en el backend, no para function-calling clásico.\n\n## Limitaciones adicionales\n\n- `image_url` en el content devuelve error 400 (vision no disponible en anónimo)\n- No hay generación de imágenes\n\n\n## Eventos SSE extra (solo con `stream: true`)\n\nDespués del último chunk y antes de `[DONE]`, el proxy puede emitir:\n\n| Evento | Cuándo | Datos |\n|--------|--------|-------|\n| `event: search_metadata` | Si hubo búsqueda web | `{queries, sources, title}` |\n| `event: widgets` | Si el modelo generó widgets genui | `[{name, data}]` |\n\nClientes OpenAI estándar que no reconocen estos eventos los ignoran automáticamente.  El campo model acepta un id de GPT (\"g-...\") para chatear como ese gizmo (ver /v1/gizmos).",
         "operationId": "chat_completions",
         "tags": [
           "Chat"
@@ -1389,6 +1389,95 @@
           },
           "404": {
             "description": "voz no encontrada"
+          }
+        }
+      }
+    },
+    "/v1/gizmos": {
+      "get": {
+        "summary": "List Gizmos",
+        "operationId": "gizmos",
+        "tags": [
+          "Gizmos"
+        ],
+        "description": "Lista tus GPTs personalizados. Usá un id como model del chat (\"model\":\"g-...\") para chatear COMO ese GPT. Autenticado.",
+        "responses": {
+          "200": {
+            "description": "Tus GPTs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "gizmos": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "example": "g-69b32b27..."
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "prompt_starters": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "short_url": {
+                            "type": "string"
+                          },
+                          "voice": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/gizmos/{gizmo_id}": {
+      "get": {
+        "summary": "Get Gizmo",
+        "operationId": "gizmo_detail",
+        "tags": [
+          "Gizmos"
+        ],
+        "description": "Detalle de un GPT (instrucciones, tools, starters, config). Autenticado.",
+        "parameters": [
+          {
+            "name": "gizmo_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del GPT"
+          },
+          "401": {
+            "description": "No autenticado"
+          },
+          "404": {
+            "description": "No encontrado"
           }
         }
       }
