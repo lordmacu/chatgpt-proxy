@@ -995,6 +995,18 @@ async def list_models():
                 "description": f"Alias → {target}",
             })
 
+    # Always expose image-generation models (these go through the chat
+    # completions endpoint and return image_url content parts).
+    for img_id in sorted(_IMAGE_MODELS):
+        if img_id not in existing_ids:
+            data.append({
+                "id":          img_id,
+                "object":      "model",
+                "created":     1750000000,
+                "owned_by":    "openai",
+                "description": "Image generation — returns image_url content parts",
+            })
+
     return {"object": "list", "data": data}
 
 # ---------------------------------------------------------------------------
@@ -1110,6 +1122,97 @@ async def delete_file(file_id: str, request: Request):
 # /v1/chat/completions
 # ---------------------------------------------------------------------------
 
+# Models that route to image generation instead of the normal chat flow.
+# Requests to these models via /v1/chat/completions return
+# content: [{type: "image_url", image_url: {url: "..."}}] — the same
+# format OpenAI's gpt-image-1 uses.
+_IMAGE_MODELS: frozenset[str] = frozenset({"gpt-image-1"})
+
+
+def _extract_image_prompt(messages: list) -> str:
+    for m in reversed(messages):
+        if m.role != "user":
+            continue
+        if isinstance(m.content, str):
+            return m.content
+        if isinstance(m.content, list):
+            for part in m.content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    return part.get("text", "")
+    return ""
+
+
+async def _image_via_chat_completions(
+    req, pool, msgs_raw: list, completion_id: str
+):
+    """Run image generation and return a chat-completion response.
+
+    The response format mirrors OpenAI's gpt-image-1: each generated image
+    becomes a content part of type "image_url".  Streaming is simulated: if
+    the caller asked for stream:true we still generate synchronously (image
+    generation is inherently blocking) and emit a single content delta.
+    """
+    prompt = _extract_image_prompt(req.messages)
+    if not prompt:
+        raise HTTPException(400, detail={"error": {"message": "No text prompt found in messages."}})
+
+    _key, session = await pool.get(msgs_raw)
+    async for _ in session.stream_message(prompt, model="auto", force_use_tools=True):
+        pass
+
+    if session._pending_image_ids:
+        await session.resolve_image_urls()
+
+    if not session.last_images:
+        raise HTTPException(503, detail={"error": {
+            "message": "No image was generated. Ensure the account is authenticated.",
+            "type": "generation_failed", "code": "generation_failed",
+        }})
+
+    content_parts = [
+        {"type": "image_url", "image_url": {"url": img["url"]}}
+        for img in session.last_images
+        if img.get("url")
+    ]
+
+    if req.stream:
+        async def _stream():
+            role_chunk = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "created": int(time.time()), "model": req.model,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(role_chunk)}\n\n".encode()
+            for part in content_parts:
+                delta_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": req.model,
+                    "choices": [{"index": 0, "delta": {"content": [part]}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(delta_chunk)}\n\n".encode()
+            done_chunk = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "created": int(time.time()), "model": req.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(done_chunk)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+
+    return JSONResponse({
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": req.model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content_parts},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    })
+
+
 def _build_search_metadata(session) -> dict:
     """
     Build the search_metadata object from the session state.
@@ -1138,6 +1241,10 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     uf        = _user_files(user_id)
     pool      = _user_pool(user_id)
     msgs_raw  = [m.model_dump() for m in req.messages]
+
+    if req.model in _IMAGE_MODELS:
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        return await _image_via_chat_completions(req, pool, msgs_raw, completion_id)
     json_mode = req.is_json_mode()
 
     system_prompt, last_user_text, file_texts = _resolve_messages(req.messages, uf)
