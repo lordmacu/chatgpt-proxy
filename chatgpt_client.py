@@ -192,7 +192,7 @@ class ChatGPTSession:
 
     async def initialize(self) -> None:
         await self._get_models()
-        await self._chat_requirements()
+        await self._ensure_chat_requirements()
         self._ready = True
 
     async def ensure_ready(self) -> None:
@@ -243,7 +243,18 @@ class ChatGPTSession:
              f"{'present' if self._chat_req_token else 'MISSING'})")
 
     async def _ensure_chat_requirements(self) -> None:
-        """Make sure we hold a live chat-requirements token, refetching on expiry."""
+        """Hold a live chat-requirements token -- but ONLY for an authenticated
+        session. The two flows diverge here:
+
+          * authenticated  -> /backend-api/...: fetch the sentinel token and echo
+            it on every conversation request (this method + the header below);
+          * anonymous       -> /backend-anon/...: the free endpoint never required
+            the token, so we skip the whole dance and leave `_chat_req_token` None,
+            which drops the header. This is the flow the proxy always used.
+        """
+        if not auth.is_authenticated():
+            self._chat_req_token = None
+            return
         if not self._chat_req_token or time.time() >= self._chat_req_expire:
             await self._chat_requirements()
 
