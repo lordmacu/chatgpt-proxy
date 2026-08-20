@@ -1193,6 +1193,15 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     yield b"data: [DONE]\n\n"
                     return
 
+            # Resolve DALL-E images and stream them as a text chunk
+            if cur_session._pending_image_ids:
+                await cur_session.resolve_image_urls()
+            for img in cur_session.last_images:
+                url = img.get("url", "")
+                name = img.get("file_name", "generated_image.png")
+                if url:
+                    yield _make_chunk(f"\n\n![{name}]({url})", req.model, completion_id).encode()
+
             yield _make_chunk("", req.model, completion_id, finish=True).encode()
 
             if cur_session.last_search_queries or cur_session.last_citations:
@@ -1200,6 +1209,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 yield f"event: search_metadata\ndata: {json.dumps(meta)}\n\n".encode()
             if cur_session.last_widgets:
                 yield f"event: widgets\ndata: {json.dumps(cur_session.last_widgets)}\n\n".encode()
+            if cur_session.last_images:
+                yield f"event: images\ndata: {json.dumps(cur_session.last_images)}\n\n".encode()
 
             yield b"data: [DONE]\n\n"
 
@@ -1239,9 +1250,20 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             except Exception as e:
                 raise HTTPException(500, str(e))
 
+        # Resolve any DALL-E images collected during streaming
+        if cur_session._pending_image_ids:
+            await cur_session.resolve_image_urls()
+
         # Use clean text (citations preserved, genui removed)
         clean = cur_session.last_clean_text or full_text
-        # If JSON mode was requested, extract the JSON from any markdown fencing
+
+        # Append generated images as markdown so clients see them inline
+        for img in cur_session.last_images:
+            url = img.get("url", "")
+            name = img.get("file_name", "generated_image.png")
+            if url:
+                clean += f"\n\n![{name}]({url})"
+
         if json_mode:
             clean = _extract_json(clean)
 
@@ -1250,7 +1272,53 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             resp["search_metadata"] = _build_search_metadata(cur_session)
         if cur_session.last_widgets:
             resp["widgets"] = cur_session.last_widgets
+        if cur_session.last_images:
+            resp["images"] = cur_session.last_images
         return JSONResponse(resp)
+
+
+# ---------------------------------------------------------------------------
+# /v1/images/generations
+# ---------------------------------------------------------------------------
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: str = "dall-e-3"
+    n: int = 1
+    size: str = "1024x1024"
+    response_format: str = "url"
+
+
+@app.post("/v1/images/generations")
+async def image_generations(req: ImageGenerationRequest, request: Request):
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    msgs_raw = [{"role": "user", "content": req.prompt}]
+    _key, session = await pool.get(msgs_raw)
+
+    async for _ in session.stream_message(
+        req.prompt,
+        model="auto",
+        force_use_tools=True,
+    ):
+        pass
+
+    if session._pending_image_ids:
+        await session.resolve_image_urls()
+
+    if not session.last_images:
+        raise HTTPException(503, detail={
+            "error": {
+                "message": "No image was generated. Ensure the account is authenticated.",
+                "type": "generation_failed",
+                "code": "generation_failed",
+            }
+        })
+
+    data = [{"url": img["url"], "revised_prompt": req.prompt}
+            for img in session.last_images[: req.n]]
+
+    return JSONResponse({"created": int(time.time()), "data": data})
 
 
 # ---------------------------------------------------------------------------
@@ -1286,7 +1354,7 @@ async def health():
             "json_mode":        "response_format: {type: json_object}",
             "quota_handling":   "auto-recycles device_id on 429/403, transparent retry",
             "image_input":      False,
-            "image_generation": False,
+            "image_generation": "DALL-E via /v1/images/generations and chat completions (requires account)",
             "web_search":       "automatic (override with web_search: true/false)",
             "force_use_tools":  "optional (enables advanced tools + genui widgets)",
             "force_use_canvas": "optional (enables Canvas / document mode)",

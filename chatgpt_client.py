@@ -2,11 +2,35 @@
 ChatGPT Android anonymous client — async, FastAPI compatible.
 """
 import re
+import pathlib
 import uuid, json, hashlib, time, sys, os
 from typing import AsyncGenerator, Optional
 import httpx
 
 import auth
+
+# ---------------------------------------------------------------------------
+# Image download cache — persisted to disk so container restarts don't refetch
+# ---------------------------------------------------------------------------
+_IMAGE_CACHE_FILE = pathlib.Path("/tmp/chatgpt_image_cache.json")
+_image_cache_mem: dict = {}
+
+
+def _image_cache_load() -> dict:
+    global _image_cache_mem
+    if not _image_cache_mem:
+        try:
+            _image_cache_mem = json.loads(_IMAGE_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return _image_cache_mem
+
+
+def _image_cache_save() -> None:
+    try:
+        _IMAGE_CACHE_FILE.write_text(json.dumps(_image_cache_mem, indent=2))
+    except Exception as e:
+        _log(f"[img-cache] save error: {e}")
 
 # Genui/cite widget delimiters (Unicode PUA: U+E200=start, U+E202=sep, U+E201=end)
 # Format: <U+E200>{type}<U+E202>{content}<U+E201>  where type='cite'|'genui'
@@ -148,6 +172,8 @@ class ChatGPTSession:
         self.last_title:   Optional[str] = None
         self.last_widgets: list = []           # [{name, data}] — genui widgets
         self.last_clean_text: str = ""         # final text without PUA markers
+        self.last_images:  list = []           # [{file_id, url, file_name, size_bytes}]
+        self._pending_image_ids: list = []     # collected during streaming, resolved after
 
     async def initialize(self) -> None:
         await self._get_models()
@@ -214,6 +240,8 @@ class ChatGPTSession:
         self.last_title          = None
         self.last_widgets        = []
         self.last_clean_text     = ""
+        self.last_images         = []
+        self._pending_image_ids  = []
 
         real_model = self._resolve_model(model)
 
@@ -588,7 +616,8 @@ class ChatGPTSession:
                 msg = evt.get("message")
                 if msg and isinstance(msg, dict):
                     last_assistant_msg_id = msg.get("id", last_assistant_msg_id)
-                    parts = (msg.get("content") or {}).get("parts") or []
+                    content = msg.get("content") or {}
+                    parts = content.get("parts") or []
                     if parts and isinstance(parts[0], str) and parts[0]:
                         new_buf = parts[0]
                         if new_buf != buf:
@@ -598,6 +627,7 @@ class ChatGPTSession:
                             clean   = chunk.translate(_WIDGET_CHARS)
                             if clean:
                                 yield clean
+                    self._queue_image_parts(content)
                     continue
 
                 # ── Format B: full message replace {"v":{message:...}} ───────
@@ -611,6 +641,7 @@ class ChatGPTSession:
                         for q in smq.get("queries") or []:
                             if q not in self.last_search_queries:
                                 self.last_search_queries.append(q)
+                        self._queue_image_parts(inner_msg.get("content") or {})
                     if inner_author == "assistant" and inner_msg.get("id"):
                         last_assistant_msg_id = inner_msg["id"]
                     continue
@@ -637,6 +668,64 @@ class ChatGPTSession:
         self.last_clean_text = _clean_buf(buf).strip()
         if last_assistant_msg_id:
             self.parent_message_id = last_assistant_msg_id
+
+    def _queue_image_parts(self, content: dict) -> None:
+        """Collect image_asset_pointer file IDs from a message content dict."""
+        if content.get("content_type") != "multimodal_text":
+            return
+        for part in (content.get("parts") or []):
+            if not isinstance(part, dict):
+                continue
+            if part.get("content_type") != "image_asset_pointer":
+                continue
+            ptr = part.get("asset_pointer", "")
+            fid = ptr.split("://", 1)[-1] if "://" in ptr else ptr
+            if fid and fid not in self._pending_image_ids:
+                self._pending_image_ids.append(fid)
+                _log(f"[img] queued {fid[:28]}")
+
+    async def resolve_image_urls(self) -> None:
+        """Resolve pending image file IDs to signed download URLs.
+
+        Results are cached to _IMAGE_CACHE_FILE so the download-metadata endpoint
+        is only called once per unique file ID across all container restarts.
+        The auth token is taken from the auth module (same as _base_headers).
+        """
+        if not self._pending_image_ids:
+            return
+        cache = _image_cache_load()
+        hdrs = {**_base_headers(self.device_id)}
+
+        for fid in self._pending_image_ids:
+            if fid in cache:
+                _log(f"[img-cache] HIT {fid[:28]}")
+                self.last_images.append(cache[fid])
+                continue
+            try:
+                r = await self.client.get(
+                    f"{BASE}/backend-api/files/{fid}/download",
+                    headers=hdrs,
+                    timeout=20.0,
+                )
+                _log(f"[img] /files/{fid[:20]}.../download → HTTP {r.status_code}")
+                if r.status_code == 200:
+                    data = r.json()
+                    entry = {
+                        "file_id":    fid,
+                        "url":        data.get("download_url", ""),
+                        "file_name":  data.get("file_name", "generated_image.png"),
+                        "size_bytes": data.get("file_size_bytes", 0),
+                    }
+                    _image_cache_mem[fid] = entry
+                    _image_cache_save()
+                    self.last_images.append(entry)
+                    _log(f"[img] saved → {entry['url'][:80]}")
+                else:
+                    _log(f"[img] resolve failed HTTP {r.status_code}: {r.text[:120]}")
+            except Exception as e:
+                _log(f"[img] resolve error for {fid[:28]}: {e}")
+
+        self._pending_image_ids.clear()
 
     async def close(self):
         await self.client.aclose()
