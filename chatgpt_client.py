@@ -549,6 +549,7 @@ class ChatGPTSession:
                             for q in smq.get("queries") or []:
                                 if q not in self.last_search_queries:
                                     self.last_search_queries.append(q)
+                            self._queue_image_parts(inner_msg.get("content") or {})
                         elif inner_author == "assistant":
                             # Full assistant snapshot — extract text if no prior patches
                             if inner_msg.get("id"):
