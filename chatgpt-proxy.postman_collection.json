@@ -1109,6 +1109,31 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Suggestions",
+      "item": [
+        {
+          "name": "Suggestions",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/suggestions",
+            "description": "Prompts sugeridos."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OK',()=>pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     }
   ]
 }

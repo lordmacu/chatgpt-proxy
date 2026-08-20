@@ -1854,6 +1854,53 @@
           }
         }
       }
+    },
+    "/v1/suggestions": {
+      "get": {
+        "summary": "Suggestions",
+        "operationId": "suggestions",
+        "tags": [
+          "Suggestions"
+        ],
+        "description": "Prompts sugeridos (starters) de la prompt library. Autenticado.",
+        "responses": {
+          "200": {
+            "description": "Sugerencias",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "suggestions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "prompt": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
