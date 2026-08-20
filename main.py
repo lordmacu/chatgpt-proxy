@@ -2180,6 +2180,34 @@ async def library_restore(library_id: str, request: Request):
     return r.json()
 
 
+@app.get("/v1/suggestions")
+async def suggestions(request: Request):
+    """Suggested prompts (starters) from ChatGPT's prompt library.
+
+    Proxies /backend-api/prompt_library/system_hints and flattens it into a flat
+    list of {category, id, title, prompt, description}. Authenticated.
+    """
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/prompt_library/system_hints")
+    if r.status_code != 200 or not r.text.strip():
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "el backend no devolvió datos (transitorio) -- reintentá",
+            "type": "upstream_error"}})
+    d = r.json()
+    out = []
+    for category, items in (d.get("items_by_system_hint") or {}).items():
+        for it in (items or []):
+            out.append({
+                "category":    category,
+                "id":          it.get("id"),
+                "title":       it.get("title"),
+                "prompt":      it.get("prompt"),
+                "description": it.get("description"),
+            })
+    return {"suggestions": out}
+
+
 @app.get("/v1/conversations")
 async def conversations(request: Request):
     """List the account's conversation history, most recent first.
