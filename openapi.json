@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ChatGPT Android Proxy",
-    "description": "API compatible con OpenAI usando el flujo anónimo de ChatGPT Android.\n\n## Capacidades del flujo anónimo\n\n| Feature | Disponible |\n|---------|------------|\n| Chat de texto | ✅ |\n| Streaming SSE | ✅ |\n| Multi-turno (30 min TTL) | ✅ |\n| System prompt | ✅ |\n| Adjuntos PDF/código/docs | ✅ |\n| Web search (auto / forzado / desactivado) | ✅ |\n| Tools avanzados + genui widgets (clima, deportes, reservas) | ✅ |\n| Canvas (documentos colaborativos) | ✅ |\n| `search_metadata` en respuesta (queries + fuentes + título) | ✅ |\n| `widgets` en respuesta (genui widgets JSON) | ✅ |\n| Imágenes como input (vision) | ❌ |\n| Generación de imágenes | ❌ |\n| Function calling / tool_calls en respuesta | ❌ |\n| Voice / TTS | ❌ |\n\n## Modelos disponibles\n\n| ID | Descripción |\n|----|-------------|\n| `gpt-5-6` | GPT-5.6 Luna (más capaz) |\n| `gpt-5-5` | GPT-5.5 |\n| `gpt-5-6-mini` | GPT-5.6 Luna Mini |\n| `gpt-5-5-mini` | GPT-5.5 Mini |\n| `gpt-5-3-mini` | GPT-5.3 Mini (más rápido) |\n| `auto` | Selección automática del servidor |\n| `gpt-4o` | Alias → `auto` |\n| `gpt-4o-mini` | Alias → `gpt-5-3-mini` |\n| `gpt-4` | Alias → `gpt-5-5` |\n| `gpt-3.5-turbo` | Alias → `gpt-5-3-mini` |\n\n## Control de tools / búsqueda web\n\n### Campos directos (extensiones propias)\n| Campo | Tipo | Efecto |\n|-------|------|--------|\n| `web_search` | `boolean\\|null` | `true`=forzar búsqueda, `false`=desactivar, `null`=automático |\n| `force_use_tools` | `boolean\\|null` | `true`=activar tools avanzados del backend (reservas, shopping, widgets) |\n| `force_use_canvas` | `boolean\\|null` | `true`=activar modo Canvas — la respuesta incluye bloques `:::writing{...}` |\n\n### Campo `tools` (compatibilidad OpenAI — input only)\nEl array `tools` se acepta pero el backend **no devuelve `tool_calls`** — la respuesta es siempre texto (`choices[0].message.content`).\nLos nombres de función se mapean a flags internos:\n\n| Nombre de función | Efecto |\n|-------------------|--------|\n| `web_search`, `search`, `brave_search`, `bing_search`, `google_search` | `force_use_search = true` |\n| `chatgpt_tools`, `all_tools`, `builtin_tools` | `force_use_tools = true` |\n| Cualquier otro nombre | `force_use_tools = true` |\n| `tool_choice: \"none\"` | Desactiva ambos modos |\n\nLos campos directos (`web_search`, `force_use_tools`) tienen prioridad sobre el array `tools`.\n",
-    "version": "2.3.0"
+    "description": "API compatible con OpenAI usando el flujo de ChatGPT Android.\n\nEl proxy corre en **uno de dos modos**, según haya token configurado\n(`CHATGPT_ACCESS_TOKEN` o un `tokens.json` guardado). `GET /health` reporta cuál está\nactivo en `auth_mode: \"anonymous\" | \"account\"`.\n\nEl modo anónimo no necesita nada: ni API key, ni cuenta, ni tarjeta. Cubre el chat\ncompleto. La cuenta solo añade lo que por definición está atado a un usuario: tus\nconversaciones, tus archivos, tus GPTs, TTS y generación de imágenes.\n\nCada operación lleva `[A]` (funciona anónimo) o `[L]` (requiere cuenta) en su resumen.\nLas `[L]` responden `401` con `type: \"auth_error\"` si no hay token.\n\n## Capacidades de chat\n\n| Capacidad | Anónimo | Cuenta |\n|-----------|:-------:|:------:|\n| Chat de texto + streaming SSE | ✅ | ✅ |\n| Multi-turno (TTL de sesión ~30 min) | ✅ | ✅ |\n| System prompt | ✅ | ✅ |\n| Web search (`web_search`) | ✅ | ✅ |\n| Tools avanzados + genui widgets (`force_use_tools`) | ✅ | ✅ |\n| Canvas (`force_use_canvas`) | ✅ | ✅ |\n| Modo JSON (`response_format`) | ✅ | ✅ |\n| Adjuntos PDF / código / docs | ✅ | ✅ |\n| `search_metadata`, `widgets` en la respuesta | ✅ | ✅ |\n| `reasoning_effort` / `thinking_effort`, `service_tier` | ✅ | ✅ |\n| Auto-rotación de cuota (device_id nuevo) | ✅ | n/a |\n| Ventana de contexto | 34.834 tokens | 52.815 (262.144 en los `-t-mini`) |\n| Modelos de razonamiento | ❌ | ✅ `gpt-5-4-t-mini`, `gpt-5-6-t-mini` |\n| Deep research | ❌ | ✅ `research` |\n| GPTs personalizados (`model: \"g-...\"`) | ❌ | ✅ |\n| Generación de imágenes | ❌ | ✅ |\n| Text-to-speech / speech-to-text | ❌ | ✅ |\n| Imágenes como input (vision) | ❌ | ❌ |\n| Function calling (`tool_calls` en la respuesta) | ❌ | ❌ |\n| `temperature`, `top_p`, `max_tokens`, penalties, `seed`, `n` | ❌ | ❌ |\n\nLas tres últimas son ❌ en **ambos** modos y no cambian con cuenta: vision no está\nexpuesto en este endpoint, los tools del backend corren del lado servidor así que nunca\ndevuelve `tool_calls`, y el protocolo de conversación no tiene campos de sampling — se\naceptan y se descartan, con una cabecera `X-Proxy-Ignored-Params` que lista cuáles.\n\n## Modelos disponibles\n\n| ID | Anónimo | Cuenta | Descripción |\n|----|:-------:|:------:|-------------|\n| `auto` | ✅ | — | El servidor elige. Solo aparece listado en anónimo, pero funciona en ambos |\n| `gpt-5-6` | ✅ | ✅ | GPT-5.6 Luna — el más capaz |\n| `gpt-5-5` | ✅ | ✅ | GPT-5.5 |\n| `gpt-5-6-mini` | ✅ | ✅ | GPT-5.6 Luna Mini |\n| `gpt-5-5-mini` | ✅ | ✅ | GPT-5.5 Mini |\n| `gpt-5-3-mini` | ✅ | ✅ | GPT-5.3 Mini — el más rápido |\n| `gpt-5-6-t-mini` | ❌ | ✅ | Razonamiento, 262k de contexto |\n| `gpt-5-4-t-mini` | ❌ | ✅ | Razonamiento, 262k de contexto |\n| `research` | ❌ | ✅ | Deep research |\n| `g-...` | ❌ | ✅ | Cualquier GPT personalizado al que tengas acceso |\n| `gpt-image-1` | ❌ | ✅ | Generación de imágenes vía `/v1/chat/completions` |\n\nAlias legacy para clientes OpenAI estándar: `gpt-4o` → `auto`, `gpt-4` → `gpt-5-5`,\n`gpt-4o-mini` y `gpt-3.5-turbo` → `gpt-5-3-mini`.\n\n## Control de tools / búsqueda web\n\n### Campos directos (extensiones propias)\n| Campo | Tipo | Efecto |\n|-------|------|--------|\n| `web_search` | `boolean\\|null` | `true`=forzar búsqueda, `false`=desactivar, `null`=automático |\n| `force_use_tools` | `boolean\\|null` | `true`=activar tools avanzados del backend (reservas, shopping, widgets) |\n| `force_use_canvas` | `boolean\\|null` | `true`=activar modo Canvas — la respuesta incluye bloques `:::writing{...}` |\n\n### Campo `tools` (compatibilidad OpenAI — input only)\nEl backend **no ejecuta funciones del cliente**: sus tools corren del lado servidor y\nnunca devuelve `tool_calls`. Los nombres solo eligen qué modo activar, usando los mismos\nnombres que upstream reporta en `enabled_tools` de cada modelo:\n\n| Nombre de función | Efecto |\n|-------------------|--------|\n| `web_search`, `search`, `brave_search`, `bing_search`, `google_search` | `force_use_search = true` |\n| `canvas`, `text_editor` | `force_use_canvas = true` |\n| `tools`, `tools2`, `app_pairing`, `chatgpt_tools`, `all_tools`, `builtin_tools` | `force_use_tools = true` |\n| Cualquier otro nombre | `force_use_tools = true` |\n| `tool_choice: \"none\"` | Desactiva los tres modos |\n\nLos campos directos tienen prioridad sobre el array `tools`.\n",
+    "version": "2.4.0"
   },
   "servers": [
     {
@@ -14,7 +14,7 @@
   "paths": {
     "/health": {
       "get": {
-        "summary": "Health Check",
+        "summary": "[A] Health Check",
         "description": "Estado del servidor: sesiones activas, archivos en memoria, capacidades.",
         "operationId": "health",
         "tags": [
@@ -83,7 +83,7 @@
     },
     "/v1/models": {
       "get": {
-        "summary": "List Models",
+        "summary": "[A] List Models",
         "description": "Devuelve los modelos disponibles en el flujo anónimo, incluyendo aliases legacy de OpenAI.",
         "operationId": "list_models",
         "tags": [
@@ -134,7 +134,7 @@
     },
     "/v1/files": {
       "post": {
-        "summary": "Upload File",
+        "summary": "[A] Upload File",
         "description": "Sube un archivo (PDF, código, documentos) para usarlo como contexto en mensajes de chat.\n\n**Formatos soportados:** PDF, texto plano, código fuente, Markdown, DOCX, XLSX, JSON, XML, etc.\n\n**NO soportado:** Imágenes (JPEG, PNG, GIF, WebP) — el flujo anónimo no tiene capacidad de visión.\n\nEl archivo se almacena en memoria y puede referenciarse mediante su `file_id` en mensajes de chat.\n\nSi `pdfplumber` está instalado, extrae el texto de PDFs correctamente. Si no, hace un fallback básico.",
         "operationId": "upload_file",
         "tags": [
@@ -218,7 +218,7 @@
         }
       },
       "get": {
-        "summary": "List Files",
+        "summary": "[A] List Files",
         "description": "Lista todos los archivos subidos en esta sesión del servidor.",
         "operationId": "list_files",
         "tags": [
@@ -275,7 +275,7 @@
     },
     "/v1/files/{file_id}": {
       "get": {
-        "summary": "Get File",
+        "summary": "[A] Get File",
         "description": "Obtiene los metadatos de un archivo específico (sin el contenido de texto).",
         "operationId": "get_file",
         "tags": [
@@ -302,7 +302,7 @@
         }
       },
       "delete": {
-        "summary": "Delete File",
+        "summary": "[A] Delete File",
         "description": "Elimina un archivo de la memoria del servidor.",
         "operationId": "delete_file",
         "tags": [
@@ -340,7 +340,7 @@
     },
     "/v1/chat/completions": {
       "post": {
-        "summary": "Chat Completions",
+        "summary": "[A] Chat Completions",
         "description": "Endpoint principal de chat, compatible con la API de OpenAI.\n\n## Características\n\n- **Modelos**: `gpt-5-6`, `gpt-5-5`, `gpt-5-6-mini`, `gpt-5-5-mini`, `gpt-5-3-mini`, `auto` (y aliases legacy)\n- **Streaming**: pasar `stream: true` para recibir SSE\n- **System prompt**: mensajes con `role: \"system\"` son inyectados en el primer turno\n- **Multi-turno**: las sesiones se mantienen por 30 min. El historial del array `messages` enruta a la sesión correcta\n- **Archivos**: referencias a `file_id` en el content multipart se inyectan como texto\n- **Web search**: controlable con `web_search: true/false/null` (o usando `tools` con `web_search` tool)\n- **Tools avanzados**: `force_use_tools: true` activa reservas, shopping, widgets en el backend\n- **Canvas**: `force_use_canvas: true` activa modo documento — la respuesta incluye bloques `:::writing{variant=\"document\" id=\"...\" title=\"...\"}`\n- **Compatibilidad `tools` OpenAI**: el array `tools` se acepta y los nombres de función se mapean a flags del backend\n\n## ⚠️ Limitación importante: no hay `tool_calls` en la respuesta\n\nEl backend anónimo de ChatGPT Android **no expone llamadas a herramientas** en formato OpenAI. Las tools se usan internamente y el resultado llega integrado en `choices[0].message.content` (texto). El campo `tools` en el request sirve solo para activar el modo correcto en el backend, no para function-calling clásico.\n\n## Limitaciones adicionales\n\n- `image_url` en el content devuelve error 400 (vision no disponible en anónimo)\n- No hay generación de imágenes\n\n\n## Eventos SSE extra (solo con `stream: true`)\n\nDespués del último chunk y antes de `[DONE]`, el proxy puede emitir:\n\n| Evento | Cuándo | Datos |\n|--------|--------|-------|\n| `event: search_metadata` | Si hubo búsqueda web | `{queries, sources, title}` |\n| `event: widgets` | Si el modelo generó widgets genui | `[{name, data}]` |\n\nClientes OpenAI estándar que no reconocen estos eventos los ignoran automáticamente.  El campo model acepta un id de GPT (\"g-...\") para chatear como ese gizmo (ver /v1/gizmos).  BÚSQUEDA WEB: mandá web_search=true para forzar búsqueda (o dejá que el modelo decida). Cuando hubo búsqueda, la respuesta incluye un objeto/evento search_metadata: {queries:[...], sources:[{url,title,attribution}], title}. En streaming llega como 'event: search_metadata'. No hay endpoint de búsqueda aparte: ChatGPT busca como herramienta dentro del chat.",
         "operationId": "chat_completions",
         "tags": [
@@ -834,7 +834,7 @@
     },
     "/v1/session/me": {
       "get": {
-        "summary": "Session Me",
+        "summary": "[A] Session Me",
         "description": "Información del usuario anónimo de la sesión actual. Proxy a `/backend-anon/me` del API de ChatGPT. Útil para depuración — devuelve el user id anónimo (`ua-xxx`) y metadatos de la sesión.",
         "operationId": "session_me",
         "tags": [
@@ -886,7 +886,7 @@
     },
     "/v1/account": {
       "get": {
-        "summary": "Account",
+        "summary": "[L] Account",
         "description": "Plan, suscripción y features habilitadas de la cuenta autenticada. Proxy a `/backend-api/accounts/check`. Requiere cuenta (CHATGPT_ACCESS_TOKEN); anónimo → 401.",
         "operationId": "account",
         "tags": [
@@ -977,7 +977,7 @@
     },
     "/v1/limits": {
       "get": {
-        "summary": "Rate Limits",
+        "summary": "[A] Rate Limits",
         "description": "Estado de rate-limit / uso por feature. Los límites no están en accounts/check: viven en `limits_progress` del flujo de conversación. Llama a `/conversation/init` (barato, no gasta mensaje). Funciona autenticado y anónimo.",
         "operationId": "limits",
         "tags": [
@@ -1038,7 +1038,7 @@
     },
     "/v1/conversations": {
       "get": {
-        "summary": "List Conversations",
+        "summary": "[L] List Conversations",
         "operationId": "conversations",
         "tags": [
           "History"
@@ -1138,7 +1138,7 @@
     },
     "/v1/conversations/{conversation_id}": {
       "get": {
-        "summary": "Get Conversation",
+        "summary": "[L] Get Conversation",
         "operationId": "conversation_detail",
         "tags": [
           "History"
@@ -1216,7 +1216,7 @@
     },
     "/v1/audio/from-message": {
       "get": {
-        "summary": "TTS From Message",
+        "summary": "[L] TTS From Message",
         "operationId": "audio_from_message",
         "tags": [
           "Audio"
@@ -1318,7 +1318,7 @@
     },
     "/v1/audio/speech": {
       "post": {
-        "summary": "TTS Free Text",
+        "summary": "[L] TTS Free Text",
         "operationId": "audio_speech",
         "tags": [
           "Audio"
@@ -1412,7 +1412,7 @@
     },
     "/v1/gizmos": {
       "get": {
-        "summary": "List Gizmos",
+        "summary": "[L] List Gizmos",
         "operationId": "gizmos",
         "tags": [
           "Gizmos"
@@ -1470,7 +1470,7 @@
     },
     "/v1/gizmos/{gizmo_id}": {
       "get": {
-        "summary": "Get Gizmo",
+        "summary": "[L] Get Gizmo",
         "operationId": "gizmo_detail",
         "tags": [
           "Gizmos"
@@ -1501,7 +1501,7 @@
     },
     "/v1/translate": {
       "post": {
-        "summary": "Translate",
+        "summary": "[A] Translate",
         "operationId": "translate",
         "tags": [
           "Translate"
@@ -1568,7 +1568,7 @@
     },
     "/v1/audio/transcriptions": {
       "post": {
-        "summary": "Transcriptions (STT)",
+        "summary": "[L] Transcriptions (STT)",
         "operationId": "transcriptions",
         "tags": [
           "Audio"
@@ -1636,7 +1636,7 @@
     },
     "/v1/library": {
       "get": {
-        "summary": "List Library",
+        "summary": "[L] List Library",
         "operationId": "library",
         "tags": [
           "Library"
@@ -1727,7 +1727,7 @@
     },
     "/v1/library/usage": {
       "get": {
-        "summary": "Library Usage",
+        "summary": "[L] Library Usage",
         "operationId": "library_usage",
         "tags": [
           "Library"
@@ -1769,7 +1769,7 @@
     },
     "/v1/library/{file_id}/download": {
       "get": {
-        "summary": "Library Download URL",
+        "summary": "[L] Library Download URL",
         "operationId": "library_download",
         "tags": [
           "Library"
@@ -1806,7 +1806,7 @@
     },
     "/v1/library/{library_id}": {
       "delete": {
-        "summary": "Trash Library File",
+        "summary": "[L] Trash Library File",
         "operationId": "library_delete",
         "tags": [
           "Library"
@@ -1834,7 +1834,7 @@
     },
     "/v1/library/{library_id}/restore": {
       "post": {
-        "summary": "Restore Library File",
+        "summary": "[L] Restore Library File",
         "operationId": "library_restore",
         "tags": [
           "Library"
@@ -1859,7 +1859,7 @@
     },
     "/v1/library/trash": {
       "delete": {
-        "summary": "Empty Trash",
+        "summary": "[L] Empty Trash",
         "operationId": "library_empty_trash",
         "tags": [
           "Library"
@@ -1874,7 +1874,7 @@
     },
     "/v1/suggestions": {
       "get": {
-        "summary": "Suggestions",
+        "summary": "[L] Suggestions",
         "operationId": "suggestions",
         "tags": [
           "Suggestions"
@@ -1915,6 +1915,156 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/projects": {
+      "post": {
+        "summary": "[L] Create Project",
+        "operationId": "create_project",
+        "tags": [
+          "Projects"
+        ],
+        "description": "Crea un Proyecto (carpeta de trabajo con instrucciones y archivos compartidos entre sus chats). Bajo el capó es un gizmo con id 'g-p-...'. No hay endpoint de listado upstream: guardá el 'id' que devuelve. Para chatear DENTRO del proyecto, usá ese id como 'model' en /v1/chat/completions. Autenticado.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "example": "Proyecto Ventas ETB"
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "description": "System prompt que aplica a todos los chats del proyecto.",
+                    "example": "Responde siempre con el tono y precios de ETB."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Proyecto creado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "example": "g-p-6a872883c1d881918d21c887318ebb20"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "instructions": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "short_url": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "'name' requerido"
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/projects/{project_id}": {
+      "get": {
+        "summary": "[L] Get Project",
+        "operationId": "get_project",
+        "tags": [
+          "Projects"
+        ],
+        "description": "Detalle de un proyecto (gizmo, tools, files, product_features, project_file_limits). Autenticado.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "g-p-..."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del proyecto"
+          },
+          "401": {
+            "description": "No autenticado"
+          },
+          "404": {
+            "description": "No encontrado"
+          }
+        }
+      },
+      "delete": {
+        "summary": "[L] Delete Project",
+        "operationId": "delete_project",
+        "tags": [
+          "Projects"
+        ],
+        "description": "Borra un proyecto. Protegido a ids 'g-p-...' para no borrar por error un GPT real. Autenticado.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "g-p-..."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Borrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "El id no es de un proyecto (g-p-...)"
+          },
+          "401": {
+            "description": "No autenticado"
           }
         }
       }
@@ -2227,5 +2377,11 @@
         }
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "Projects",
+      "description": "Proyectos de ChatGPT: carpetas de trabajo con instrucciones y archivos compartidos entre sus chats."
+    }
+  ]
 }

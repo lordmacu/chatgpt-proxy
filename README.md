@@ -140,6 +140,8 @@ Features:
   --no-search          Force web search off
   --tools              Enable advanced tools (code interpreter, etc.)
   --canvas             Enable Canvas / document mode
+  --effort LEVEL       Thinking effort: standard | extended | max
+  --tier TIER          Service tier: standard | priority
   --json, -j           Force JSON output mode
 
 Files:
@@ -214,6 +216,7 @@ You: Now explain that using simpler words
 | `/model <name>` | Switch model (e.g. `/model gpt-4o`) |
 | `/search on\|off` | Toggle web search |
 | `/tools on\|off` | Toggle advanced tools |
+| `/effort <level>` | Thinking effort: `standard` \| `extended` \| `max` (or `default`) |
 | `/json on\|off` | Toggle JSON output mode |
 | `/system <text>` | Change the system prompt |
 | `/info` | Show current session settings |
@@ -265,9 +268,30 @@ OpenAI-compatible chat completions.
 | `force_use_canvas` | boolean | `null` | Enable Canvas mode |
 | `tools` | array | — | OpenAI tools format (see note) |
 | `tool_choice` | string | — | `"none"` disables all modes |
-| `temperature`, `max_tokens`, `top_p`, etc. | — | — | Accepted, ignored |
+| `reasoning_effort` | string | `null` | `minimal`/`low` → `standard`, `medium` → `extended`, `high` → `max` |
+| `thinking_effort` | string | `null` | Native form: `standard` \| `extended` \| `max` |
+| `service_tier` | string | `null` | `auto`/`default`/`flex`/`scale` → `standard`; `priority` passes through |
+| `force_disable_features` | array | — | Feature names to switch off for this turn |
+| `temperature`, `max_tokens`, `top_p`, etc. | — | — | Accepted, dropped (see note) |
 
-> **Note on `tools`:** The anonymous backend doesn't execute functions, but tool names control modes: `"web_search"` → enables search, `"chatgpt_tools"` → enables advanced tools, any other name → enables advanced tools.
+> **Note on `tools`:** The backend doesn't execute caller-supplied functions — its tools
+> run server-side and it never returns `tool_calls`. Tool *names* only pick which
+> server-side mode to switch on, using the same names upstream reports in each model's
+> `enabled_tools`: `web_search`/`search` → web search, `canvas` → Canvas,
+> `tools`/`chatgpt_tools`/any other name → advanced tools. `tool_choice: "none"`
+> disables all three.
+
+> **Note on sampling parameters:** `temperature`, `top_p`, `max_tokens`,
+> `presence_penalty`, `frequency_penalty`, `stop`, `seed` and `n` have no equivalent
+> in the ChatGPT conversation protocol — the fields don't exist upstream. They're
+> accepted so stock OpenAI clients keep working, then dropped. A request that carries
+> any of them comes back with an `X-Proxy-Ignored-Params` header listing exactly which
+> ones were dropped, so the loss is visible instead of silent. The generation controls
+> that *are* real are `reasoning_effort`/`thinking_effort` and `service_tier`; an
+> unsupported value for either is a `400` from the proxy rather than a wasted upstream
+> request. Note that in anonymous mode `/v1/models` reports
+> `configurable_thinking_effort: false` for every model, so the effort value is carried
+> through but may not change the answer.
 
 **Response (non-streaming):**
 ```json
@@ -300,7 +324,7 @@ data: [DONE]
 
 ### GET /v1/models
 
-Returns available models.
+Returns available models, each with the capabilities upstream reports for it.
 
 ```bash
 curl http://localhost:8000/v1/models
@@ -310,14 +334,28 @@ curl http://localhost:8000/v1/models
 {
   "object": "list",
   "data": [
-    {"id": "auto",        "object": "model"},
-    {"id": "gpt-4o",      "object": "model"},
-    {"id": "gpt-4o-mini", "object": "model"},
-    {"id": "o1",          "object": "model"},
-    {"id": "o3-mini",     "object": "model"}
+    {
+      "id": "gpt-5-6",
+      "object": "model",
+      "owned_by": "openai",
+      "description": "GPT-5.6 Luna",
+      "context_window": 52815,
+      "reasoning_type": "auto",
+      "enabled_tools": ["tools", "tools2", "search", "canvas", "app_pairing", "image_gen_tool_enabled"],
+      "configurable_thinking_effort": false,
+      "thinking_efforts": []
+    }
   ]
 }
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `context_window` | Per-model token ceiling. This is the only token limit in the API — there is no `max_tokens` *request* parameter |
+| `reasoning_type` | `auto` \| `reasoning` \| `none` |
+| `enabled_tools` | Server-side tools this model may use — the names `tools` accepts |
+| `configurable_thinking_effort` | Whether `thinking_effort` is expected to change behaviour on this model |
+| `thinking_efforts` | Effort levels offered for this model (empty in anonymous mode) |
 
 ---
 
@@ -456,50 +494,167 @@ Via API:
 
 ## Quota handling
 
-Each anonymous device ID has a message limit. When exhausted:
+Anonymous mode has **two separate ceilings**, and they behave very differently. Both
+were measured against the live backend, not read off a doc.
+
+| | What it is | When it hits | What happens | Reset |
+|---|---|---|---|---|
+| **Model cap** | Messages on the top model (`gpt-5-6`) | message **11** | **Silent downgrade** to `gpt-5-6-mini` — still HTTP 200, no error, no warning | ~5 h |
+| **Hourly cap** | Messages per device per hour | ~30–45+ | Real `429`/`403`: *"You've reached our limit of messages per hour"* | 1 h |
+
+The hourly number is a range on purpose: one run did 45 messages on a fresh device
+without tripping it, another tripped at 31 — traffic from the same IP earlier in the
+window contributes, so it is not a clean per-device constant.
+
+**The hourly cap is not a wall for API callers.** On `429`/`403` the proxy marks the
+session exhausted, takes a fresh device ID, and retries the same request transparently
+— verified working immediately after a real 429, with no wait. Only a double failure
+surfaces a standard `rate_limit_exceeded` error:
 
 1. The session is marked as exhausted
 2. The next request automatically gets a fresh device ID
 3. The current request is retried transparently
 4. On double failure, a standard `rate_limit_exceeded` error is returned
 
-The CLI also retries once automatically with a visible message:
+The CLI does the same, with a visible message:
 ```
 Retrying with a fresh session…
+```
+
+Multi-turn survives the rotation for API callers, because the proxy rebuilds context
+from the `messages` array you send on every request. The CLI keeps state in the session
+instead, so a rotation there starts the conversation over.
+
+**The model cap is the one to watch.** Because the downgrade comes back as a normal
+`200`, nothing triggers the rotation logic — the proxy keeps using the same device and
+the answers keep arriving from the smaller model. Check `model_limits` in
+`GET /v1/limits` to see it:
+
+```json
+{"model_slug": "gpt-5-6", "using_default_model_slug": "gpt-5-6",
+ "resets_after": "2026-08-20T20:46:09Z"}
+```
+
+An empty `model_limits` means no model is capped right now.
+
+### Per-feature limits
+
+`GET /v1/limits` reports the rest, and works in both modes:
+
+| Feature | Anonymous | Account (Go plan) |
+|---------|-----------|-------------------|
+| `file_upload` | 3 / 24 h | 80 / 3 h |
+| `paste_text_to_file` | 3 / 24 h | 80 / 3 h |
+| `dictation` | 1 / 7 days | — |
+| `image_gen` | **0 — blocked** ("Log in or sign up to create images for free") | 106 / ~11 h |
+| `reason` | — | 300 / ~1 h |
+| `deep_research` | — | 5 / ~1 month |
+
+Account figures are from a `chatgptgoplan` subscription and will differ on other plans;
+read the live values rather than hardcoding these. Chat messages themselves have no
+counter in `limits_progress` in either mode — the caps only show up as `model_limits`
+once you reach one.
+
+---
+
+## Anonymous vs account
+
+The proxy runs in one of two modes, decided by whether a token is configured
+(`CHATGPT_ACCESS_TOKEN`, or a saved `tokens.json`). `GET /health` reports which one
+is active as `auth_mode: "anonymous" | "account"`.
+
+Anonymous mode needs nothing at all — no API key, no account, no credit card. It
+covers full chat, and that is the point of this project. An account only adds the
+things that are, by definition, tied to a user: your conversations, your files, your
+custom GPTs, TTS, and image generation.
+
+### Chat capabilities
+
+| Capability | Anonymous | Account |
+|------------|:---------:|:-------:|
+| Text chat + streaming SSE | ✅ | ✅ |
+| Multi-turn (session TTL ~30 min) | ✅ | ✅ |
+| System prompt | ✅ | ✅ |
+| Web search (`web_search`) | ✅ | ✅ |
+| Advanced tools (`force_use_tools`) | ✅ | ✅ |
+| Canvas (`force_use_canvas`) | ✅ | ✅ |
+| JSON output mode | ✅ | ✅ |
+| File attachments (PDF, code, docs) | ✅ | ✅ |
+| `reasoning_effort` / `thinking_effort` | ✅ | ✅ |
+| `service_tier` | ✅ | ✅ |
+| Quota auto-rotation (new device ID) | ✅ | n/a |
+| Context window | 34,834 tokens | 52,815 (262,144 on `-t-mini`) |
+| Reasoning models | ❌ | ✅ `gpt-5-4-t-mini`, `gpt-5-6-t-mini` |
+| Deep research model | ❌ | ✅ `research` |
+| Custom GPTs (`model: "g-..."`) | ❌ | ✅ |
+| Image generation | ❌ | ✅ |
+| Text-to-speech | ❌ | ✅ |
+| Speech-to-text | ❌ | ✅ |
+| Image input (vision) | ❌ | ❌ |
+| Function calling (`tool_calls` in the response) | ❌ | ❌ |
+| `temperature`, `top_p`, `max_tokens`, penalties, `seed`, `n` | ❌ | ❌ |
+
+The last three are ❌ in *both* modes and won't change with an account: vision isn't
+exposed on this endpoint, the backend's tools run server-side so it never returns
+`tool_calls`, and the conversation protocol simply has no sampling fields — those are
+accepted and then dropped, with an `X-Proxy-Ignored-Params` response header listing
+which ones.
+
+### Endpoints
+
+| Endpoint | Anonymous | Account | Notes |
+|----------|:---------:|:-------:|-------|
+| `GET /health` | ✅ | ✅ | Reports the active `auth_mode` |
+| `GET /` | ✅ | ✅ | Built-in web chat UI |
+| `GET /v1/models` | ✅ | ✅ | Shorter list anonymously — see below |
+| `GET /v1/session/me` | ✅ | ✅ | Identity is `ua-...` vs `user-...` |
+| `POST /v1/chat/completions` | ✅ | ✅ | Except `model: "g-..."` (custom GPTs) |
+| `POST` / `GET` / `DELETE /v1/files` | ✅ | ✅ | Proxy-local store, never touches the account |
+| `GET /v1/limits` | ✅ | ✅ | Per-feature remaining counts |
+| `POST /v1/translate` | ✅ | ✅ | Doesn't spend a chat message |
+| `GET /v1/account` | ❌ | ✅ | |
+| `GET` / `POST /v1/custom-instructions` | ❌ | ✅ | |
+| `GET /v1/gizmos`, `GET /v1/gizmos/{id}` | ❌ | ✅ | |
+| `GET /v1/conversations`, `GET /v1/conversations/{id}` | ❌ | ✅ | Anonymous turns are never stored server-side |
+| `GET /v1/library`, `/usage`, `/{id}/download` | ❌ | ✅ | |
+| `DELETE /v1/library/{id}`, `/trash`, `POST /{id}/restore` | ❌ | ✅ | |
+| `GET /v1/suggestions` | ❌ | ✅ | Prompt-library starters |
+| `POST /v1/projects`, `GET`/`DELETE /v1/projects/{id}` | ❌ | ✅ | Projects = `g-p-...` gizmos; chat inside with `model:"g-p-..."` |
+| `POST /v1/audio/transcriptions` | ❌ | ✅ | |
+| `POST /v1/audio/speech` | ❌ | ✅ | `/backend-anon/synthesize` doesn't exist |
+| `GET /v1/audio/from-message` | ❌ | ✅ | Same `synthesize` backend |
+| `POST /v1/images/generations` | ❌ | ✅ | |
+| `GET /images/{f}`, `GET /audio/{f}` | ✅ | ✅ | Serve files the proxy already cached locally |
+
+Account-only endpoints answer with a plain `401`:
+
+```json
+{"error": {"message": "This endpoint needs an authenticated account (set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}}
 ```
 
 ---
 
 ## Available models
 
-| Model ID | Description |
-|----------|-------------|
-| `auto` | ChatGPT picks the best model automatically |
-| `gpt-4o` | GPT-4o |
-| `gpt-4o-mini` | GPT-4o Mini |
-| `o1` | o1 reasoning model |
-| `o3-mini` | o3 Mini reasoning model |
+`GET /v1/models` returns what the current mode actually offers, each entry carrying
+its real capabilities (`context_window`, `reasoning_type`, `enabled_tools`, …).
 
----
+| Model ID | Anonymous | Account | Description |
+|----------|:---------:|:-------:|-------------|
+| `auto` | ✅ | — | Server picks the model. Only listed anonymously, but works in both |
+| `gpt-5-6` | ✅ | ✅ | GPT-5.6 Luna — most capable |
+| `gpt-5-5` | ✅ | ✅ | GPT-5.5 |
+| `gpt-5-6-mini` | ✅ | ✅ | GPT-5.6 Luna Mini |
+| `gpt-5-5-mini` | ✅ | ✅ | GPT-5.5 Mini |
+| `gpt-5-3-mini` | ✅ | ✅ | GPT-5.3 Mini — fastest |
+| `gpt-5-6-t-mini` | ❌ | ✅ | Reasoning, 262k context |
+| `gpt-5-4-t-mini` | ❌ | ✅ | Reasoning, 262k context |
+| `research` | ❌ | ✅ | Deep research |
+| `g-...` | ❌ | ✅ | Any custom GPT you have access to |
+| `gpt-image-1` | ❌ | ✅ | Image generation via `/v1/chat/completions` |
 
-## What works / doesn't work
-
-| Feature | Status |
-|---------|--------|
-| Text chat | ✅ |
-| Streaming SSE | ✅ |
-| Multi-turn conversations | ✅ |
-| System prompt | ✅ |
-| Web search | ✅ |
-| Advanced tools (code interpreter, etc.) | ✅ |
-| Canvas (document mode) | ✅ |
-| JSON output mode | ✅ |
-| File attachments (PDF, text, code) | ✅ |
-| Quota auto-rotation | ✅ |
-| Image input (vision) | ❌ Not available in anonymous mode |
-| Image generation | ❌ Not available in anonymous mode |
-| Function calling (tool_calls in response) | ❌ Anonymous backend never returns tool_calls |
-| Voice / TTS | ❌ Requires a logged-in account |
+Legacy aliases for stock OpenAI clients: `gpt-4o` → `auto`, `gpt-4` → `gpt-5-5`,
+`gpt-4o-mini` and `gpt-3.5-turbo` → `gpt-5-3-mini`.
 
 ---
 

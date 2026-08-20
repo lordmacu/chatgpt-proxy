@@ -16,6 +16,12 @@
       "value": "",
       "type": "string",
       "description": "Se rellena automáticamente al subir un archivo"
+    },
+    {
+      "key": "project_id",
+      "value": "",
+      "type": "string",
+      "description": "Se rellena al crear un proyecto"
     }
   ],
   "item": [
@@ -1027,6 +1033,128 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Projects",
+      "description": "Proyectos de ChatGPT: carpetas con instrucciones y archivos compartidos entre sus chats (gizmo g-p-...).",
+      "item": [
+        {
+          "name": "Create Project",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/projects",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Proyecto Ventas ETB\", \"instructions\": \"Responde siempre con el tono y precios de ETB.\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Crea un proyecto. Guarda el id (g-p-...) en la variable project_id automáticamente."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "var j = pm.response.json();",
+                  "pm.test('Has g-p- id', function(){ pm.expect(j.id).to.be.a('string'); });",
+                  "if (j.id) { pm.collectionVariables.set('project_id', j.id); }"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get Project",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/projects/{{project_id}}",
+            "description": "Detalle del proyecto (gizmo, tools, files, project_file_limits).",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Chat inside Project",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/chat/completions",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\": \"{{project_id}}\", \"messages\": [{\"role\": \"user\", \"content\": \"hola\"}], \"stream\": false}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Chatear DENTRO del proyecto: model = id del proyecto (g-p-...). Las respuestas ya aplican las instrucciones del proyecto."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Delete Project",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/v1/projects/{{project_id}}",
+            "description": "Borra el proyecto. Protegido a ids g-p-... (no borra GPTs reales).",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('deleted', function(){ pm.expect(pm.response.json().deleted).to.eql(true); });"
                 ]
               }
             }

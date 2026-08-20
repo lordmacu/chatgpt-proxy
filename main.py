@@ -2232,6 +2232,75 @@ async def suggestions(request: Request):
     return {"suggestions": out}
 
 
+class ProjectRequest(BaseModel):
+    name:         str
+    instructions: str = ""
+
+
+@app.post("/v1/projects")
+async def create_project(req: ProjectRequest, request: Request):
+    """Create a ChatGPT Project (a "g-p-..." gizmo that groups chats with shared
+    instructions). Authenticated. There is no clean list endpoint upstream, so
+    keep the returned `id` -- get it with GET /v1/projects/{id}, delete with
+    DELETE /v1/projects/{id}."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    if not (req.name or "").strip():
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "'name' is required", "type": "invalid_request_error"}})
+    r = await _backend_post(request, "/backend-api/projects",
+                            {"name": req.name, "instructions": req.instructions})
+    if r.status_code != 200 or not r.text.strip():
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200] or "sin cuerpo"}
+        return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
+                            content={"error": {"type": "project_error", "detail": detail}})
+    g = ((r.json().get("resource") or {}).get("gizmo")) or {}
+    disp = g.get("display") or {}
+    return {
+        "id":           g.get("id"),
+        "name":         disp.get("name") or req.name,
+        "description":  disp.get("description"),
+        "instructions": g.get("instructions"),
+        "short_url":    g.get("short_url"),
+    }
+
+
+@app.get("/v1/projects/{project_id}")
+async def get_project(project_id: str, request: Request):
+    """Detail of a project (a gizmo under the hood -- same as GET /v1/gizmos/{id})."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/gizmos/" + project_id)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200]}
+        return JSONResponse(status_code=r.status_code,
+                            content={"error": {"type": "project_error", "detail": detail}})
+    return r.json()
+
+
+@app.delete("/v1/projects/{project_id}")
+async def delete_project(project_id: str, request: Request):
+    """Delete a project. Guarded to project ids (g-p-...) so it can't remove a real
+    GPT by mistake; projects delete via the gizmo endpoint."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    if not project_id.startswith("g-p-"):
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "solo se pueden borrar proyectos (id g-p-...). Para GPTs usá el builder de ChatGPT.",
+            "type": "invalid_request_error"}})
+    r = await _backend_request(request, "DELETE", "/backend-api/gizmos/" + project_id)
+    if r.status_code not in (200, 204):
+        return JSONResponse(status_code=r.status_code, content={"error": {
+            "type": "project_error", "detail": r.text[:200]}})
+    return {"deleted": True, "id": project_id}
+
+
 @app.get("/v1/conversations")
 async def conversations(request: Request):
     """List the account's conversation history, most recent first.
