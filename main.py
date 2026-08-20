@@ -1597,3 +1597,44 @@ async def account(request: Request):
         },
         "features": feats,
     }
+
+
+@app.get("/v1/limits")
+async def limits(request: Request):
+    """Current rate-limit / usage state, per feature.
+
+    accounts/check has no limits; they live in `limits_progress` on the
+    conversation flow. This calls /conversation/init (cheap, sends no message)
+    and returns the per-feature remaining counts + reset times, the model caps
+    (populated when you approach one), and any blocked features. Works for both
+    the authenticated account and the anonymous session.
+    """
+    prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
+    path   = prefix + "/conversation/init"
+
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns_client = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
+
+    try:
+        hdrs = {**_base_headers(device_id),
+                "X-OpenAI-Target-Path": path, "Content-Type": "application/json"}
+        r = await client.post(f"{BASE}{path}", headers=hdrs,
+                             json={"conversation_mode_kind": "primary_assistant"})
+        r.raise_for_status()
+        d = r.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    return {
+        "limits_progress":    d.get("limits_progress", []),
+        "model_limits":       d.get("model_limits", []),
+        "blocked_features":   d.get("blocked_features", []),
+        "default_model_slug": d.get("default_model_slug"),
+    }
