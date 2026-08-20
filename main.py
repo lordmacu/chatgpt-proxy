@@ -1972,6 +1972,67 @@ async def translate(req: TranslateRequest, request: Request):
     return {"text": d.get("text"), "target": req.target, "source": req.source}
 
 
+@app.post("/v1/audio/transcriptions")
+async def transcriptions(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str = Form("whisper-1"),
+    language: str = Form(None),
+    response_format: str = Form("json"),
+):
+    """Speech-to-text (OpenAI-compatible). Multipart `file` = the audio.
+
+    Forwards to ChatGPT's /backend-api/transcribe (Whisper). The file's
+    content-type must match its bytes (mp3 verified working; m4a/wav/webm too if
+    labeled correctly). Returns {"text": ...} (or plain text if
+    response_format=text). Authenticated only.
+    """
+    if not auth.is_authenticated():
+        return _needs_account()
+
+    content = await file.read()
+    if not content:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "empty audio file", "type": "invalid_request_error"}})
+    ctype = file.content_type or "audio/mpeg"
+    fname = file.filename or "audio.mp3"
+
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=90.0, follow_redirects=True)
+
+    path = "/backend-api/transcribe"
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        r = await client.post(
+            f"{BASE}{path}", headers=hdrs,
+            files={"file": (fname, content, ctype)},
+            data={"dictation_session_id": str(uuid.uuid4()),
+                  "attempt_id":           str(uuid.uuid4())},
+        )
+    finally:
+        if owns:
+            await client.aclose()
+
+    if r.status_code != 200 or not r.text.strip():
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200] or "sin cuerpo"}
+        return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
+                            content={"error": {"type": "transcription_error", "detail": detail}})
+
+    text = r.json().get("text", "")
+    if response_format == "text":
+        return Response(content=text, media_type="text/plain")
+    return {"text": text}
+
+
 @app.get("/v1/conversations")
 async def conversations(request: Request):
     """List the account's conversation history, most recent first.
