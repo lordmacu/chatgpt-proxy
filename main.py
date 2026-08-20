@@ -1671,6 +1671,25 @@ async def _backend_get(request: Request, path: str, params: dict = None):
             await client.aclose()
 
 
+async def _backend_post(request: Request, path: str, json_body: dict):
+    """POST JSON to a /backend-api path (same client handling as _backend_get)."""
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=20.0, follow_redirects=True)
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path,
+                "Content-Type": "application/json"}
+        return await client.post(f"{BASE}{path}", headers=hdrs, json=json_body)
+    finally:
+        if owns:
+            await client.aclose()
+
+
 @app.get("/v1/gizmos")
 async def gizmos(request: Request):
     """List the account's custom GPTs (gizmos). Use an id as the chat `model`
@@ -1708,6 +1727,65 @@ async def gizmo_detail(gizmo_id: str, request: Request):
         return JSONResponse(status_code=r.status_code,
                             content={"error": {"type": "gizmo_error", "detail": detail}})
     return r.json()
+
+
+class CustomInstructions(BaseModel):
+    """Writable custom-instruction fields; all optional for partial updates."""
+    about_user_message:         Optional[str]  = None  # "what should ChatGPT know about you"
+    about_model_message:        Optional[str]  = None  # "how should ChatGPT respond"
+    traits_model_message:       Optional[str]  = None  # personality traits
+    name_user_message:          Optional[str]  = None  # what to call you
+    role_user_message:          Optional[str]  = None  # what you do
+    other_user_message:         Optional[str]  = None  # anything else
+    personality_type_selection: Optional[str]  = None
+    disabled_tools:             Optional[list] = None
+    enabled:                    Optional[bool] = None
+    traits_enabled:             Optional[bool] = None
+    personality_traits:         Optional[dict] = None
+
+
+@app.get("/v1/custom-instructions")
+async def get_custom_instructions(request: Request):
+    """The account's custom instructions (about_user, about_model, traits, ...)."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/user_system_messages")
+    if r.status_code != 200 or not r.text.strip():
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "el backend no devolvió datos (transitorio) -- reintentá",
+            "type": "upstream_error"}})
+    d = r.json()
+    d.pop("object", None)
+    return d
+
+
+@app.post("/v1/custom-instructions")
+async def set_custom_instructions(req: CustomInstructions, request: Request):
+    """Update custom instructions. Partial: only the fields you send change; the
+    rest are preserved (merged onto the current values before saving)."""
+    if not auth.is_authenticated():
+        return _needs_account()
+
+    cur_r = await _backend_get(request, "/backend-api/user_system_messages")
+    if cur_r.status_code != 200 or not cur_r.text.strip():
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "no se pudo leer el estado actual (transitorio) -- reintentá",
+            "type": "upstream_error"}})
+    merged = cur_r.json()
+    merged.pop("object", None)
+    merged.update(req.model_dump(exclude_none=True))
+
+    r = await _backend_post(request, "/backend-api/user_system_messages", merged)
+    if r.status_code != 200 or not r.text.strip():
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200] or "sin cuerpo"}
+        return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
+                            content={"error": {"type": "custom_instructions_error", "detail": detail}})
+    d = r.json()
+    d.pop("object", None)
+    return d
 
 
 @app.get("/v1/conversations")
