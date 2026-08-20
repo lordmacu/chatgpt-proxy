@@ -843,8 +843,10 @@ def _make_chunk(content: str, model: str, completion_id: str, finish: bool = Fal
     return f"data: {json.dumps(chunk)}\n\n"
 
 
-def _make_completion(content: str, model: str, completion_id: str) -> dict:
-    words = len(content.split())
+def _make_completion(content, model: str, completion_id: str) -> dict:
+    words = len(content.split()) if isinstance(content, str) else sum(
+        len((p.get("text") or "").split()) for p in content if isinstance(p, dict)
+    )
     return {
         "id":      completion_id,
         "object":  "chat.completion",
@@ -1301,14 +1303,21 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     yield b"data: [DONE]\n\n"
                     return
 
-            # Resolve DALL-E images and stream them as a text chunk
+            # Resolve DALL-E images and emit them as image_url content delta parts
             if cur_session._pending_image_ids:
                 await cur_session.resolve_image_urls()
             for img in cur_session.last_images:
                 url = img.get("url", "")
-                name = img.get("file_name", "generated_image.png")
-                if url:
-                    yield _make_chunk(f"\n\n![{name}]({url})", req.model, completion_id).encode()
+                if not url:
+                    continue
+                img_delta = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": req.model,
+                    "choices": [{"index": 0, "finish_reason": None,
+                                 "delta": {"content": [{"type": "image_url",
+                                                        "image_url": {"url": url}}]}}],
+                }
+                yield f"data: {json.dumps(img_delta)}\n\n".encode()
 
             yield _make_chunk("", req.model, completion_id, finish=True).encode()
 
@@ -1364,18 +1373,25 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
         # Use clean text (citations preserved, genui removed)
         clean = cur_session.last_clean_text or full_text
-
-        # Append generated images as markdown so clients see them inline
-        for img in cur_session.last_images:
-            url = img.get("url", "")
-            name = img.get("file_name", "generated_image.png")
-            if url:
-                clean += f"\n\n![{name}]({url})"
-
         if json_mode:
             clean = _extract_json(clean)
 
-        resp = _make_completion(clean, req.model, completion_id)
+        image_parts = [
+            {"type": "image_url", "image_url": {"url": img["url"]}}
+            for img in cur_session.last_images
+            if img.get("url")
+        ]
+        if image_parts:
+            # Return content as an array so image_url parts are OpenAI-compatible
+            # and llm-libre can rehost them.  A leading text part carries the
+            # model's commentary (e.g. "Here is the image you requested").
+            content: list | str = (
+                [{"type": "text", "text": clean}] + image_parts if clean.strip()
+                else image_parts
+            )
+            resp = _make_completion(content, req.model, completion_id)
+        else:
+            resp = _make_completion(clean, req.model, completion_id)
         if cur_session.last_search_queries or cur_session.last_citations:
             resp["search_metadata"] = _build_search_metadata(cur_session)
         if cur_session.last_widgets:
