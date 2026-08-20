@@ -91,3 +91,19 @@ CHATGPT_ACCESS_TOKEN=<token> python -m uvicorn main:app --port 8899 &
 python smoke_test.py                # read-only
 python smoke_test.py --spend        # incluye chat/TTS/imágenes (gasta cuota)
 ```
+
+## El contrato de capacidades
+
+Desde la versión 2.5.0 este proxy publica en `GET /health` un bloque
+`capabilities` con once booleanos y una clave `contract: 1`. Los valores son
+**efectivos**: ya resueltos contra la cuenta y el plan de este despliegue. Si la
+suscripción vence, `images` pasa a `false` solo, y llm-libre deja de rutear
+generación de imágenes acá sin que nadie edite un YAML.
+
+Un endpoint cuya capacidad está en `false` responde **`501 Not Implemented`**,
+no `404` ni `503`: `404` no se distingue de un error de ruteo, y `503` hace que
+el gateway reintente y acumule sospecha contra una ruta que en este plan nunca
+iba a funcionar.
+
+La matriz de arriba es la referencia humana; `GET /health` es la que leen las
+máquinas, y es la que no se desactualiza.

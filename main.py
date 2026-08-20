@@ -10,7 +10,7 @@ Endpoints — [A] works anonymously, [L] needs a logged-in account.
   [A] GET  /v1/session/me              — session info (user id, device id)
   [A] GET  /v1/limits                  — per-feature remaining counts
   [A] POST /v1/translate               — translate text (spends no chat message)
-  [A] POST|GET|DEL /v1/files[/{id}]    — proxy-local file store, never touches the account
+  [L] POST|GET|DEL /v1/files[/{id}]    — proxy-local file store, gated by capabilities.files
   [A] GET  /health, GET /              — status, built-in web chat UI
   [A] GET  /images/{f}, /audio/{f}     — serve files the proxy already cached locally
   [L] GET  /v1/account                 — plan, id
@@ -20,7 +20,8 @@ Endpoints — [A] works anonymously, [L] needs a logged-in account.
   [L] GET  /v1/library[...]            — the account's file library
   [L] GET  /v1/suggestions             — prompt-library starters
   [L] POST /v1/audio/transcriptions    — speech-to-text
-  [L] POST /v1/audio/speech            — TTS (/backend-anon/synthesize does not exist)
+  [L] POST /v1/audio/speech            — TTS (/backend-anon/synthesize does not exist), raw audio bytes
+  [L] POST /chatgpt/audio/speech       — same TTS, pre-contract JSON shape (url + metadata)
   [L] GET  /v1/audio/from-message      — TTS of a stored message (same backend)
   [L] POST /v1/images/generations      — image generation
 
@@ -99,6 +100,7 @@ import pathlib
 import ipaddress
 from urllib.parse import urlparse
 from typing import Optional, AsyncGenerator, Union, List
+from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse, Response
@@ -1483,6 +1485,7 @@ async def upload_file(
     Auth: Authorization: Bearer <your-api-key>
     Compatible with the OpenAI Files API.
     """
+    await require_capability("files")
     user_id = _get_user_id(request)
     uf      = _user_files(user_id)
 
@@ -1547,6 +1550,7 @@ async def upload_file(
 
 @app.get("/v1/files")
 async def list_files(request: Request):
+    await require_capability("files")
     user_id = _get_user_id(request)
     uf      = _user_files(user_id)
     data    = [
@@ -1558,6 +1562,7 @@ async def list_files(request: Request):
 
 @app.get("/v1/files/{file_id}")
 async def get_file(file_id: str, request: Request):
+    await require_capability("files")
     user_id = _get_user_id(request)
     uf      = _user_files(user_id)
     if file_id not in uf:
@@ -1567,6 +1572,7 @@ async def get_file(file_id: str, request: Request):
 
 @app.delete("/v1/files/{file_id}")
 async def delete_file(file_id: str, request: Request):
+    await require_capability("files")
     user_id = _get_user_id(request)
     uf      = _user_files(user_id)
     if file_id not in uf:
@@ -2074,6 +2080,7 @@ class ImageGenerationRequest(BaseModel):
 
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request):
+    await require_capability("images")
     # Fail fast when anonymous: image generation needs an account, and without
     # this the message is spent before the 503.
     if not auth.is_authenticated():
@@ -2311,6 +2318,28 @@ def _needs_account() -> JSONResponse:
     )
 
 
+async def require_capability(name: str) -> None:
+    """Refuse with 501 when this account cannot do `name`.
+
+    501, not 404 and not 503, and the distinction is load-bearing for the
+    gateway. A 404 is indistinguishable from a routing mistake. A 503 says "it
+    broke" -- so the gateway retries, accumulates suspicion against the route and
+    fails over, spending attempts on something that was never going to work on
+    this plan. 501 says: this proxy, deliberately, does not do this right now.
+
+    `capabilities.snapshot()` is blocking (guarded by a threading.Lock, and it
+    can make a vendor round trip of up to 15 seconds once per refresh interval),
+    so it is offloaded to a thread rather than awaited directly -- calling it
+    inline here would freeze the event loop for every concurrent request.
+    """
+    state = await asyncio.to_thread(capabilities.snapshot)
+    if not capabilities.effective(state)[name]:
+        raise HTTPException(
+            501,
+            f"This proxy cannot serve '{name}' with its current account "
+            f"(see GET /health, capabilities.{name}).")
+
+
 async def _backend_get(request: Request, path: str, params: dict = None):
     """GET a /backend-api path, reusing a live session's client or a temp one.
     Returns the httpx.Response (caller checks status)."""
@@ -2516,6 +2545,7 @@ async def transcriptions(
     labeled correctly). Returns {"text": ...} (or plain text if
     response_format=text). Authenticated only.
     """
+    await require_capability("audio_transcription")
     if not auth.is_authenticated():
         return _needs_account()
 
@@ -2795,6 +2825,7 @@ async def conversations(request: Request):
     Proxies /backend-api/conversations. Query params: `offset` (default 0),
     `limit` (default 28), `order` (default 'updated'). Authenticated only.
     """
+    await require_capability("conversations")
     if not auth.is_authenticated():
         return _needs_account()
 
@@ -2844,6 +2875,7 @@ async def conversation_detail(conversation_id: str, request: Request):
     tree into `messages: [{id, role, content, create_time}]`, following creation
     order and dropping empty/system nodes. Authenticated only.
     """
+    await require_capability("conversations")
     if not auth.is_authenticated():
         return _needs_account()
 
@@ -2947,6 +2979,7 @@ async def audio_from_message(
     `format` to mp3 (also aac). Authenticated only -- synthesize has no anonymous
     endpoint, and the conversation must belong to the account.
     """
+    await require_capability("audio_speech")
     if not auth.is_authenticated():
         return _needs_account()
     path = "/backend-api/synthesize"
@@ -2994,28 +3027,31 @@ async def audio_from_message(
             "voice": voice, "format": format}
 
 
-@app.post("/v1/audio/speech")
-async def audio_speech(req: SpeechRequest, request: Request):
-    """Free-text TTS: give it `input` and get back an mp3 URL.
+@dataclass(frozen=True)
+class Synthesized:
+    """One synthesis, before it is shaped for a particular endpoint."""
+    audio: bytes
+    media_type: str
+    text: str            # what was ACTUALLY synthesized
+    exact_match: bool    # False when the model altered the text on the way
+    voice: str
+    format: str
+    conversation_id: str
+    message_id: str
+
+
+async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesized:
+    """The chat-echo + /backend-api/synthesize round trip.
+
+    Extracted so the OpenAI-shaped endpoint and the native one are two thin
+    shells over one implementation, instead of one endpoint with a `raw=` flag
+    threading a branch through 60 lines.
 
     synthesize can only read an assistant message, so this first makes the model
-    echo `input` verbatim (a throwaway conversation), verifies the reply matches,
-    then synthesizes it. Costs one chat message per call. Returns the audio URL,
-    the `text` actually synthesized, and `exact_match` (false if the model altered
-    the text -- audio is still returned so you can decide). Voices: juniper, cove,
+    echo `text` verbatim (a throwaway conversation), verifies the reply matches,
+    then synthesizes it. Costs one chat message per call. Voices: juniper, cove,
     ember, breeze, maple, vale, glimmer, orbit, fathom, ridge.
-
-    body: { "input": "...", "voice": "juniper", "format": "mp3", "model": "auto" }
     """
-    text = (req.input or "").strip()
-    if not text:
-        return JSONResponse(status_code=400, content={"error": {
-            "message": "'input' is required", "type": "invalid_request_error"}})
-    # synthesize is authenticated-only; check BEFORE the chat turn so an
-    # anonymous call fails fast instead of burning a message and then 401-ing.
-    if not auth.is_authenticated():
-        return _needs_account()
-
     # Have the model reproduce the text; retry once if it isn't verbatim.
     session = None
     reply = ""
@@ -3025,21 +3061,21 @@ async def audio_speech(req: SpeechRequest, request: Request):
                 await session.close()
             session = ChatGPTSession()
             reply = "".join([frag async for frag in session.stream_message(
-                _VERBATIM_PROMPT.format(t=text), model=req.model)]).strip()
+                _VERBATIM_PROMPT.format(t=text), model=model)]).strip()
             if reply == text:
                 break
         exact = reply == text
 
         cid, mid = session.conversation_id, session.parent_message_id
         if not cid or not mid:
-            return JSONResponse(status_code=502, content={"error": {
-                "message": "no se pudo obtener el mensaje a sintetizar", "type": "upstream_error"}})
+            raise HTTPException(502, detail={"error": {
+                "message": "could not obtain the message to synthesize", "type": "upstream_error"}})
 
         path = "/backend-api/synthesize"
         r = await session.client.get(f"{BASE}{path}",
             headers={**_base_headers(session.device_id), "X-OpenAI-Target-Path": path},
             params={"conversation_id": cid, "message_id": mid,
-                    "voice": req.voice, "format": req.format})
+                    "voice": voice, "format": fmt})
     finally:
         if session:
             await session.close()
@@ -3050,14 +3086,59 @@ async def audio_speech(req: SpeechRequest, request: Request):
             detail = j.get("detail", j) if isinstance(j, dict) else j
         except Exception:
             detail = r.text[:200]
-        return JSONResponse(status_code=r.status_code,
-                            content={"error": {"type": "synthesize_error", "detail": detail}})
+        raise HTTPException(r.status_code, detail={"error": {
+            "type": "synthesize_error", "detail": detail}})
 
-    media  = r.headers.get("content-type", "audio/mpeg")
-    stored = _store_audio(r.content, mid[:36], req.voice, req.format, media)
-    return {**stored, "text": reply, "exact_match": exact,
-            "voice": req.voice, "format": req.format,
-            "conversation_id": cid, "message_id": mid}
+    media = r.headers.get("content-type", "audio/mpeg")
+    return Synthesized(audio=r.content, media_type=media, text=reply, exact_match=exact,
+                       voice=voice, format=fmt, conversation_id=cid, message_id=mid)
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: SpeechRequest, request: Request):
+    """OpenAI-compatible TTS: raw audio bytes, with the correct Content-Type.
+
+    It used to return JSON carrying an mp3 URL. Every OpenAI client writes the
+    response body straight to a file, so that shape needed special-casing this
+    one provider -- which is the thing the gateway in front of it exists to
+    avoid. The extra facts this flow produces (`exact_match` in particular: it
+    makes the model echo the input, and the model sometimes edits it) are real
+    and are kept, as response headers, where a client that does not care never
+    sees them and one that does can still read them. The JSON form lives on at
+    /chatgpt/audio/speech.
+    """
+    await require_capability("audio_speech")
+    text = (req.input or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "'input' is required", "type": "invalid_request_error"}})
+    s = await _synthesize(text, req.voice, req.format, req.model)
+    stored = _store_audio(s.audio, s.message_id[:36], s.voice, s.format, s.media_type)
+    return Response(content=s.audio, media_type=s.media_type, headers={
+        "X-Audio-Url":       stored["url"],
+        "X-Exact-Match":     "true" if s.exact_match else "false",
+        "X-Conversation-Id": s.conversation_id,
+        "X-Message-Id":      s.message_id,
+    })
+
+
+@app.post("/chatgpt/audio/speech")
+async def chatgpt_audio_speech(req: SpeechRequest, request: Request):
+    """The pre-contract JSON shape, under this provider's own prefix.
+
+    Anything a provider offers beyond the standard surface lives here; the
+    standard path stays the one every OpenAI client already knows.
+    """
+    await require_capability("audio_speech")
+    text = (req.input or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "'input' is required", "type": "invalid_request_error"}})
+    s = await _synthesize(text, req.voice, req.format, req.model)
+    stored = _store_audio(s.audio, s.message_id[:36], s.voice, s.format, s.media_type)
+    return {**stored, "text": s.text, "exact_match": s.exact_match,
+            "voice": s.voice, "format": s.format,
+            "conversation_id": s.conversation_id, "message_id": s.message_id}
 
 
 @app.get("/audio/{filename}", include_in_schema=False)
