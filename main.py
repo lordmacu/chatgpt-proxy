@@ -28,13 +28,29 @@ Anonymous flow capabilities:
   ❌ Voice / TTS — requires an account
 
 OpenAI `tools` field compatibility (input-only):
-  The `tools` array is accepted for compatibility, but the anonymous backend never
-  returns tool_calls. Function names are mapped to internal backend flags:
+  The `tools` array is accepted for compatibility, but the backend never returns
+  tool_calls: its tools run server-side (search, canvas, image gen, connectors,
+  MCP) and surface as text/widgets, never as a function the caller must execute.
+  Tool *names* are therefore used only to pick which server-side mode to turn on.
+  The names below match the `enabled_tools` list the upstream /models endpoint
+  reports for each model — currently ["tools", "tools2", "search", "canvas",
+  "app_pairing", "image_gen_tool_enabled"]:
     • "web_search" / "search" / ...       → force_use_search = true
-    • "chatgpt_tools" / "all_tools" / ... → force_use_tools = true
-    • any other name                       → force_use_tools = true
-    • tool_choice: "none"                  → disables both modes
+    • "canvas" / "text_editor"            → force_use_canvas = true
+    • "chatgpt_tools" / "tools" / ...     → force_use_tools  = true
+    • any other name                       → force_use_tools  = true
+    • tool_choice: "none"                  → disables all three modes
   The response is always text in choices[0].message.content, never tool_calls.
+
+Sampling parameters:
+  The conversation protocol has no temperature / top_p / max_tokens / penalties —
+  the field simply does not exist upstream, so these are accepted (for client
+  compatibility) and dropped. Requests that carry them get an informational
+  `X-Proxy-Ignored-Params` response header so the loss is visible rather than
+  silent. What the backend *does* expose is `thinking_effort` (standard |
+  extended | max, also reachable through OpenAI's `reasoning_effort`) and
+  `service_tier` (standard | priority); both are validated, so a bad value is a
+  400 from this proxy instead of a wasted upstream request.
 """
 import io
 import os
@@ -115,8 +131,36 @@ class Message(BaseModel):
 
 # Built-in tool names that this proxy recognises in the OpenAI tools array.
 # Any other name activates force_use_tools (the backend's internal tools).
+# The bare names ("search", "tools", "tools2", "canvas") are the ones upstream
+# itself uses in each model's `enabled_tools` list.
 _BUILTIN_TOOL_WEB_SEARCH = {"web_search", "search", "brave_search", "bing_search", "google_search"}
-_BUILTIN_TOOL_ALL        = {"chatgpt_tools", "all_tools", "builtin_tools"}
+_BUILTIN_TOOL_CANVAS     = {"canvas", "text_editor"}
+_BUILTIN_TOOL_ALL        = {"chatgpt_tools", "all_tools", "builtin_tools",
+                            "tools", "tools2", "app_pairing"}
+
+# Sampling fields the OpenAI schema defines and this backend has no equivalent
+# for. Accepted so stock clients keep working, reported back in a header so the
+# caller can tell they were dropped.
+_IGNORED_SAMPLING_FIELDS = (
+    "temperature", "max_tokens", "top_p",
+    "presence_penalty", "frequency_penalty", "stop", "seed", "n",
+)
+
+# OpenAI's reasoning_effort vocabulary folded onto the three values the backend
+# accepts for thinking_effort. Native values pass through unchanged.
+_EFFORT_ALIASES = {
+    "none": "standard", "minimal": "standard", "low": "standard",
+    "standard": "standard",
+    "medium": "extended", "default": "extended", "extended": "extended",
+    "high": "max", "xhigh": "max", "max": "max",
+}
+
+# OpenAI's service_tier vocabulary folded onto the two tiers the backend accepts.
+_TIER_ALIASES = {
+    "auto": "standard", "default": "standard", "standard": "standard",
+    "flex": "standard", "scale": "standard",
+    "priority": "priority",
+}
 
 
 class ChatCompletionRequest(BaseModel):
@@ -146,7 +190,23 @@ class ChatCompletionRequest(BaseModel):
     # force_use_canvas: true/null — enable Canvas mode (collaborative documents)
     force_use_canvas: Optional[bool] = Field(default=None)
 
-    # ── OpenAI compatibility fields (accepted, ignored) ────────────────────────
+    # ── Generation controls the backend really honours ─────────────────────────
+    # thinking_effort: "standard" | "extended" | "max" — how long a reasoning
+    # model deliberates. reasoning_effort is OpenAI's spelling of the same idea
+    # and is folded onto these three values; thinking_effort wins if both are set.
+    thinking_effort:   Optional[str] = None
+    reasoning_effort:  Optional[str] = None
+    # service_tier: OpenAI's "auto"/"default"/"flex"/"scale" all map to the
+    # backend's "standard"; "priority" passes through.
+    service_tier:      Optional[str] = None
+    # force_disable_features: feature names to switch off for this turn. Not
+    # validated upstream — unknown names are ignored rather than rejected.
+    force_disable_features: Optional[List[str]] = None
+
+    # ── OpenAI compatibility fields (accepted, dropped) ────────────────────────
+    # No equivalent exists in the conversation protocol. Kept so stock OpenAI
+    # clients don't break; echoed back in X-Proxy-Ignored-Params so the caller
+    # can see they had no effect.
     temperature:       Optional[float] = None
     max_tokens:        Optional[int]   = None
     top_p:             Optional[float] = None
@@ -162,15 +222,19 @@ class ChatCompletionRequest(BaseModel):
         """True when the client requested JSON output."""
         return (self.response_format or {}).get("type") == "json_object"
 
-    def resolved_backend_flags(self) -> tuple[Optional[bool], Optional[bool]]:
+    def resolved_backend_flags(
+        self,
+    ) -> tuple[Optional[bool], Optional[bool], Optional[bool]]:
         """
-        Return (force_use_search, force_use_tools) by resolving the OpenAI tools +
-        tool_choice semantics on top of the direct web_search / force_use_tools overrides.
+        Return (force_use_search, force_use_tools, force_use_canvas) by resolving the
+        OpenAI tools + tool_choice semantics on top of the direct web_search /
+        force_use_tools / force_use_canvas overrides.
 
         Priority: direct override > inferred from tools array.
         """
-        search    = self.web_search
-        use_tools = self.force_use_tools
+        search     = self.web_search
+        use_tools  = self.force_use_tools
+        use_canvas = self.force_use_canvas
 
         if self.tools and self.tool_choice != "none":
             names = {
@@ -178,25 +242,67 @@ class ChatCompletionRequest(BaseModel):
                 for t in self.tools
                 if isinstance(t, dict)
             }
-            only_search = names and names.issubset(_BUILTIN_TOOL_WEB_SEARCH)
-            has_search  = bool(names & _BUILTIN_TOOL_WEB_SEARCH)
+            has_search = bool(names & _BUILTIN_TOOL_WEB_SEARCH)
+            has_canvas = bool(names & _BUILTIN_TOOL_CANVAS)
+            # Names that map onto no specific mode still mean "the caller wants
+            # tools", which upstream only understands as force_use_tools.
+            generic    = names - _BUILTIN_TOOL_WEB_SEARCH - _BUILTIN_TOOL_CANVAS
 
-            if only_search:
-                if search is None:
-                    search = True
-            else:
-                if use_tools is None:
-                    use_tools = True
-                if has_search and search is None:
-                    search = True
+            if has_search and search is None:
+                search = True
+            if has_canvas and use_canvas is None:
+                use_canvas = True
+            if generic and use_tools is None:
+                use_tools = True
 
         elif self.tool_choice == "none":
             if search is None:
                 search = False
             if use_tools is None:
                 use_tools = False
+            if use_canvas is None:
+                use_canvas = False
 
-        return search, use_tools
+        return search, use_tools, use_canvas
+
+    def resolved_thinking_effort(self) -> Optional[str]:
+        """Native thinking_effort, or OpenAI's reasoning_effort folded onto it."""
+        raw = self.thinking_effort or self.reasoning_effort
+        if raw is None:
+            return None
+        effort = _EFFORT_ALIASES.get(str(raw).strip().lower())
+        if effort is None:
+            raise HTTPException(400, detail={"error": {
+                "message": (
+                    f"Unsupported reasoning/thinking effort {raw!r}. "
+                    f"Accepted: {', '.join(sorted(set(_EFFORT_ALIASES)))}."
+                ),
+                "type": "invalid_request_error",
+                "param": "reasoning_effort",
+                "code": "invalid_value",
+            }})
+        return effort
+
+    def resolved_service_tier(self) -> Optional[str]:
+        """OpenAI service_tier folded onto the two tiers the backend accepts."""
+        if self.service_tier is None:
+            return None
+        tier = _TIER_ALIASES.get(str(self.service_tier).strip().lower())
+        if tier is None:
+            raise HTTPException(400, detail={"error": {
+                "message": (
+                    f"Unsupported service_tier {self.service_tier!r}. "
+                    f"Accepted: {', '.join(sorted(set(_TIER_ALIASES)))}."
+                ),
+                "type": "invalid_request_error",
+                "param": "service_tier",
+                "code": "invalid_value",
+            }})
+        return tier
+
+    def ignored_params(self) -> list[str]:
+        """Sampling fields the caller sent that this backend cannot honour."""
+        return [f for f in _IGNORED_SAMPLING_FIELDS if getattr(self, f, None) is not None]
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -981,21 +1087,43 @@ async def list_models():
             "created":     1750000000,
             "owned_by":    "openai",
             "description": m.get("title", ""),
+            # Capabilities as upstream reports them, so a client can tell what a
+            # model actually supports instead of guessing. context_window is the
+            # only real token limit in this API — there is no max_tokens *request*
+            # parameter, only this per-model ceiling.
+            "context_window":  m.get("max_tokens"),
+            "reasoning_type":  m.get("reasoning_type"),
+            "enabled_tools":   m.get("enabled_tools") or [],
+            "configurable_thinking_effort": bool(m.get("configurable_thinking_effort")),
+            "thinking_efforts": [
+                e.get("thinking_effort") if isinstance(e, dict) else e
+                for e in (m.get("thinking_efforts") or [])
+            ],
         }
         for m in cached_models
         if m.get("slug") or m.get("id")
     ]
 
+    # Every entry carries the same keys, so a client can read capabilities off any
+    # model without special-casing aliases.
+    _BLANK_CAPS = {
+        "context_window": None, "reasoning_type": None, "enabled_tools": [],
+        "configurable_thinking_effort": False, "thinking_efforts": [],
+    }
+    by_id = {d["id"]: d for d in data}
+
     # Add legacy aliases for OpenAI-compatible clients
-    existing_ids = {d["id"] for d in data}
+    existing_ids = set(by_id)
     for alias, target in _LEGACY_ALIASES.items():
         if alias not in existing_ids:
+            caps = {k: by_id.get(target, {}).get(k, v) for k, v in _BLANK_CAPS.items()}
             data.append({
                 "id":          alias,
                 "object":      "model",
                 "created":     1750000000,
                 "owned_by":    "openai",
                 "description": f"Alias → {target}",
+                **caps,
             })
 
     # Always expose image-generation models (these go through the chat
@@ -1008,6 +1136,7 @@ async def list_models():
                 "created":     1750000000,
                 "owned_by":    "openai",
                 "description": "Image generation — returns image_url content parts",
+                **_BLANK_CAPS,
             })
 
     return {"object": "list", "data": data}
@@ -1256,9 +1385,19 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
     system_prompt, last_user_text, file_texts = _resolve_messages(req.messages, uf)
 
-    completion_id                   = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    _key, session                   = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
-    force_use_search, force_use_tools = req.resolved_backend_flags()
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    _key, session = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
+
+    force_use_search, force_use_tools, force_use_canvas = req.resolved_backend_flags()
+    # Both raise a 400 before the upstream request is made, so an unsupported
+    # value never costs a message from the anonymous quota.
+    thinking_effort = req.resolved_thinking_effort()
+    service_tier    = req.resolved_service_tier()
+
+    # Advertised on the response so a caller that sent temperature/top_p/... can
+    # see they were dropped instead of assuming they took effect.
+    ignored = req.ignored_params()
+    extra_headers = {"X-Proxy-Ignored-Params": ",".join(ignored)} if ignored else {}
 
     if req.stream:
         async def event_stream() -> AsyncGenerator[bytes, None]:
@@ -1282,8 +1421,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                         file_texts        = file_texts or None,
                         force_use_search  = force_use_search,
                         force_use_tools   = force_use_tools,
-                        force_use_canvas  = req.force_use_canvas,
+                        force_use_canvas  = force_use_canvas,
                         json_mode         = json_mode,
+                        thinking_effort   = thinking_effort,
+                        service_tier      = service_tier,
+                        force_disable_features = req.force_disable_features,
                     ):
                         if text_chunk:
                             yield _make_chunk(text_chunk, req.model, completion_id).encode()
@@ -1338,7 +1480,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                     **extra_headers},
         )
 
     else:
@@ -1355,8 +1498,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     file_texts        = file_texts or None,
                     force_use_search  = force_use_search,
                     force_use_tools   = force_use_tools,
-                    force_use_canvas  = req.force_use_canvas,
+                    force_use_canvas  = force_use_canvas,
                     json_mode         = json_mode,
+                    thinking_effort   = thinking_effort,
+                    service_tier      = service_tier,
+                    force_disable_features = req.force_disable_features,
                 ):
                     full_text += chunk
                 break  # success
@@ -1402,7 +1548,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             resp["widgets"] = cur_session.last_widgets
         if cur_session.last_images:
             resp["images"] = cur_session.last_images
-        return JSONResponse(resp)
+        if service_tier:
+            resp["service_tier"] = service_tier
+        return JSONResponse(resp, headers=extra_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -1786,6 +1934,42 @@ async def set_custom_instructions(req: CustomInstructions, request: Request):
     d = r.json()
     d.pop("object", None)
     return d
+
+
+class TranslateRequest(BaseModel):
+    text:   str
+    target: str            # target language code, e.g. "en", "es", "fr"
+    source: Optional[str] = None  # optional source language code (auto-detect if omitted)
+
+
+@app.post("/v1/translate")
+async def translate(req: TranslateRequest, request: Request):
+    """Translate text via ChatGPT's language-learning translate endpoint.
+
+    Lightweight: does NOT spend a chat message (unlike /v1/audio/speech). Give
+    `text` and a `target` language code; `source` is optional (auto-detected).
+    Returns { text: <translation>, target, source }.
+    """
+    text = (req.text or "").strip()
+    if not text or not req.target:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "'text' and 'target' are required", "type": "invalid_request_error"}})
+
+    prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
+    body = {"text": text, "targetLanguageCode": req.target}
+    if req.source:
+        body["sourceLanguageCode"] = req.source
+
+    r = await _backend_post(request, prefix + "/language-learning-block/translate", body)
+    if r.status_code != 200 or not r.text.strip():
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200] or "sin cuerpo"}
+        return JSONResponse(status_code=r.status_code if r.status_code != 200 else 502,
+                            content={"error": {"type": "translate_error", "detail": detail}})
+    d = r.json()
+    return {"text": d.get("text"), "target": req.target, "source": req.source}
 
 
 @app.get("/v1/conversations")
