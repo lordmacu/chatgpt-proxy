@@ -1765,33 +1765,92 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "url",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "true → devuelve la URL en vez de los bytes"
           }
         ],
-        "description": "URL presignada de descarga de un archivo de la biblioteca.",
+        "description": "Descarga un archivo de la biblioteca (toma el file_id). El proxy baja los bytes (la URL de estuary pide Bearer) y devuelve el archivo. ?url=1 devuelve la URL cruda.",
         "responses": {
           "200": {
-            "description": "URL",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "file_id": {
-                      "type": "string"
-                    },
-                    "download_url": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
+            "description": "El archivo (bytes) o {download_url} si url=1"
           },
           "401": {
             "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/library/{library_id}": {
+      "delete": {
+        "summary": "Trash Library File",
+        "operationId": "library_delete",
+        "tags": [
+          "Library"
+        ],
+        "description": "Manda un archivo a la papelera (recuperable). Toma el library_id (libfile_...). Libera espacio recién al vaciar la papelera.",
+        "parameters": [
+          {
+            "name": "library_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "En papelera"
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/library/{library_id}/restore": {
+      "post": {
+        "summary": "Restore Library File",
+        "operationId": "library_restore",
+        "tags": [
+          "Library"
+        ],
+        "description": "Restaura un archivo de la papelera. Toma el library_id.",
+        "parameters": [
+          {
+            "name": "library_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restaurado"
+          }
+        }
+      }
+    },
+    "/v1/library/trash": {
+      "delete": {
+        "summary": "Empty Trash",
+        "operationId": "library_empty_trash",
+        "tags": [
+          "Library"
+        ],
+        "description": "Vacía la papelera: borra PERMANENTE los archivos y libera el espacio. Irreversible.",
+        "responses": {
+          "200": {
+            "description": "Vaciada"
           }
         }
       }

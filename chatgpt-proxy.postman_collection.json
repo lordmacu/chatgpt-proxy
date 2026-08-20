@@ -1080,6 +1080,33 @@
             "description": "URL de descarga."
           },
           "response": []
+        },
+        {
+          "name": "Delete (trash)",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/v1/library/{{library_id}}",
+            "description": "A papelera (recuperable). Toma library_id."
+          },
+          "response": []
+        },
+        {
+          "name": "Restore",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/library/{{library_id}}/restore",
+            "description": "Restaurar."
+          },
+          "response": []
+        },
+        {
+          "name": "Empty Trash",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/v1/library/trash",
+            "description": "Vaciar papelera (PERMANENTE)."
+          },
+          "response": []
         }
       ]
     }
