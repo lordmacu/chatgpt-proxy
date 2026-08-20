@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac relay for the ChatGPT proxy's access token.
+  Runs relay_refresh.py hourly (and at load): mints a fresh access token from the
+  chatgpt.com session (works from this residential IP) and, when it changes,
+  pushes it to Coolify on `blog` and redeploys. Install:
+      cp com.chatgptproxy.relay.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.chatgptproxy.relay.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chatgptproxy.relay</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/cristian/chatgpt-proxy/relay_refresh.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/cristian/chatgpt-proxy</string>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/cristian/chatgpt-proxy/relay.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/cristian/chatgpt-proxy/relay.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
