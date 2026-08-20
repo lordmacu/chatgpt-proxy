@@ -1196,6 +1196,108 @@
           }
         }
       }
+    },
+    "/v1/audio/from-message": {
+      "get": {
+        "summary": "TTS From Message",
+        "operationId": "audio_from_message",
+        "tags": [
+          "Audio"
+        ],
+        "description": "Text-to-speech de un mensaje EXISTENTE (ChatGPT synthesize). Necesita conversation_id + message_id (de /v1/conversations/{id}); no es TTS de texto libre. Guarda el audio y devuelve una URL servida por /audio/{file} (como las imágenes). raw=true devuelve los bytes. Voces: juniper, cove, ember, breeze, maple, vale, glimmer, orbit, fathom, ridge. Autenticado.",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "voice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "juniper"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "mp3",
+              "enum": [
+                "mp3",
+                "aac"
+              ]
+            }
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "true → devuelve los bytes del audio en vez de la URL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "URL del audio guardado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "example": "http://host/audio/<msg>-juniper.mp3"
+                    },
+                    "conversation_id": {
+                      "type": "string"
+                    },
+                    "message_id": {
+                      "type": "string"
+                    },
+                    "voice": {
+                      "type": "string",
+                      "example": "juniper"
+                    },
+                    "format": {
+                      "type": "string",
+                      "example": "mp3"
+                    },
+                    "content_type": {
+                      "type": "string",
+                      "example": "audio/mpeg"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "voz o mensaje no encontrado"
+          }
+        }
+      }
     }
   },
   "components": {

@@ -789,6 +789,61 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Audio",
+      "item": [
+        {
+          "name": "TTS From Message",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/audio/from-message?conversation_id={{conversation_id}}&message_id={{message_id}}&voice=juniper&format=mp3",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "audio",
+                "from-message"
+              ],
+              "query": [
+                {
+                  "key": "conversation_id",
+                  "value": "{{conversation_id}}"
+                },
+                {
+                  "key": "message_id",
+                  "value": "{{message_id}}"
+                },
+                {
+                  "key": "voice",
+                  "value": "juniper"
+                },
+                {
+                  "key": "format",
+                  "value": "mp3"
+                }
+              ]
+            },
+            "description": "TTS de un mensaje existente. Devuelve {url,...}. Voces: juniper, cove, ember, breeze, maple, vale, glimmer, orbit, fathom, ridge.",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('Has url', function(){ pm.expect(pm.response.json()).to.have.property('url'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     }
   ]
 }
