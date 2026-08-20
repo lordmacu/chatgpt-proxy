@@ -1481,6 +1481,73 @@
           }
         }
       }
+    },
+    "/v1/translate": {
+      "post": {
+        "summary": "Translate",
+        "operationId": "translate",
+        "tags": [
+          "Translate"
+        ],
+        "description": "Traduce texto vía el endpoint de language-learning de ChatGPT. Liviano: NO gasta mensaje de chat. Body {text, target, source?}.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text",
+                  "target"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "example": "Hola mundo"
+                  },
+                  "target": {
+                    "type": "string",
+                    "example": "en",
+                    "description": "código de idioma destino"
+                  },
+                  "source": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "idioma origen (opcional, autodetecta)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Traducción",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "faltan campos"
+          }
+        }
+      }
     }
   },
   "components": {

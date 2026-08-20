@@ -964,6 +964,46 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "Translate",
+      "item": [
+        {
+          "name": "Translate",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/translate",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"text\": \"Hola mundo\", \"target\": \"en\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Traduce texto (no gasta chat)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     }
   ]
 }
