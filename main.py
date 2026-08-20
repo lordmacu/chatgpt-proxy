@@ -1638,3 +1638,118 @@ async def limits(request: Request):
         "blocked_features":   d.get("blocked_features", []),
         "default_model_slug": d.get("default_model_slug"),
     }
+
+
+def _needs_account() -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"error": {"message": "This endpoint needs an authenticated account "
+                                      "(set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}},
+    )
+
+
+@app.get("/v1/conversations")
+async def conversations(request: Request):
+    """List the account's conversation history, most recent first.
+
+    Proxies /backend-api/conversations. Query params: `offset` (default 0),
+    `limit` (default 28), `order` (default 'updated'). Authenticated only.
+    """
+    if not auth.is_authenticated():
+        return _needs_account()
+
+    params = {
+        "offset": request.query_params.get("offset", "0"),
+        "limit":  request.query_params.get("limit", "28"),
+        "order":  request.query_params.get("order", "updated"),
+    }
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns_client = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
+
+    path = "/backend-api/conversations"
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        r = await client.get(f"{BASE}{path}", params=params, headers=hdrs)
+        r.raise_for_status()
+        d = r.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    items = [{
+        "id":          it.get("id"),
+        "title":       it.get("title"),
+        "snippet":     it.get("snippet"),
+        "create_time": it.get("create_time"),
+        "update_time": it.get("update_time"),
+        "is_archived": it.get("is_archived"),
+        "is_starred":  it.get("is_starred"),
+        "gizmo_id":    it.get("gizmo_id"),
+    } for it in d.get("items", [])]
+    return {"items": items, "total": d.get("total"),
+            "limit": d.get("limit"), "offset": d.get("offset")}
+
+
+@app.get("/v1/conversations/{conversation_id}")
+async def conversation_detail(conversation_id: str, request: Request):
+    """A single conversation as an ordered message list.
+
+    Proxies /backend-api/conversation/{id} and flattens the raw ChatGPT `mapping`
+    tree into `messages: [{id, role, content, create_time}]`, following creation
+    order and dropping empty/system nodes. Authenticated only.
+    """
+    if not auth.is_authenticated():
+        return _needs_account()
+
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns_client = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
+
+    path = "/backend-api/conversation/" + conversation_id
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        r = await client.get(f"{BASE}{path}", headers=hdrs)
+        r.raise_for_status()
+        d = r.json()
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    messages = []
+    for node in (d.get("mapping", {}) or {}).values():
+        m = node.get("message")
+        if not m:
+            continue
+        role  = (m.get("author") or {}).get("role")
+        parts = (m.get("content") or {}).get("parts") or []
+        text  = "".join(p for p in parts if isinstance(p, str)).strip()
+        if not text or role in (None, "system"):
+            continue
+        messages.append({
+            "id":          m.get("id"),
+            "role":        role,
+            "content":     text,
+            "create_time": m.get("create_time"),
+        })
+    messages.sort(key=lambda x: x.get("create_time") or 0)
+
+    return {
+        "id":          conversation_id,
+        "title":       d.get("title"),
+        "create_time": d.get("create_time"),
+        "update_time": d.get("update_time"),
+        "is_archived": d.get("is_archived"),
+        "gizmo_id":    d.get("gizmo_id"),
+        "messages":    messages,
+    }
