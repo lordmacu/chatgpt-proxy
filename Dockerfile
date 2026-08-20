@@ -14,7 +14,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # reaching port 8890. Both main.py and chatgpt_client.py import it. Adding a module
 # to the codebase does NOT add it to the image: this line is the whole manifest,
 # and it has to be updated by hand whenever a new local module appears.
-COPY chatgpt_client.py main.py auth.py dpop.py session_web.py ./
+#
+# It happened again on 2026-08-20, the same way: `capabilities.py` (the
+# capability contract) and `tool_calls.py` (emulated function calling) both
+# landed on main, both are imported by main.py at module scope, and neither was
+# on this line -- so the container crash-looped on
+# `ModuleNotFoundError: No module named 'capabilities'` and port 8890 went dark.
+# If you add a .py file that main.py or chatgpt_client.py imports, add it HERE
+# in the same commit.
+COPY chatgpt_client.py main.py auth.py dpop.py session_web.py \
+     capabilities.py tool_calls.py ./
 
 ENV PYTHONUNBUFFERED=1
 
