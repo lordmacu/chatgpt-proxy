@@ -1245,6 +1245,10 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     pool      = _user_pool(user_id)
     msgs_raw  = [m.model_dump() for m in req.messages]
 
+    # A "g-..." model id means "run this custom GPT" (gizmo). The proxy routes the
+    # conversation through it and keeps its own sessions per GPT.
+    gizmo_id = req.model if isinstance(req.model, str) and req.model.startswith("g-") else None
+
     if req.model in _IMAGE_MODELS:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         return await _image_via_chat_completions(req, pool, msgs_raw, completion_id)
@@ -1253,7 +1257,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     system_prompt, last_user_text, file_texts = _resolve_messages(req.messages, uf)
 
     completion_id                   = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    _key, session                   = await pool.get(msgs_raw, system_prompt=system_prompt)
+    _key, session                   = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
     force_use_search, force_use_tools = req.resolved_backend_flags()
 
     if req.stream:
@@ -1289,7 +1293,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     if attempt == 0:
                         # First failure: transparently retry with a fresh device_id
                         pool._pool.pop(cur_key, None)
-                        cur_key, cur_session = await pool.get(msgs_raw, system_prompt=system_prompt)
+                        cur_key, cur_session = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
                     else:
                         # Second failure: likely IP-limited, report error to client
                         err = _quota_error_payload()
@@ -1360,7 +1364,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             except QuotaExceededError:
                 if attempt == 0:
                     pool._pool.pop(cur_key, None)
-                    cur_key, cur_session = await pool.get(msgs_raw, system_prompt=system_prompt)
+                    cur_key, cur_session = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
                 else:
                     raise HTTPException(429, detail=_quota_error_payload())
 
@@ -1646,6 +1650,64 @@ def _needs_account() -> JSONResponse:
         content={"error": {"message": "This endpoint needs an authenticated account "
                                       "(set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}},
     )
+
+
+async def _backend_get(request: Request, path: str, params: dict = None):
+    """GET a /backend-api path, reusing a live session's client or a temp one.
+    Returns the httpx.Response (caller checks status)."""
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=20.0, follow_redirects=True)
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        return await client.get(f"{BASE}{path}", headers=hdrs, params=params)
+    finally:
+        if owns:
+            await client.aclose()
+
+
+@app.get("/v1/gizmos")
+async def gizmos(request: Request):
+    """List the account's custom GPTs (gizmos). Use an id as the chat `model`
+    (`"model": "g-..."`) to talk to that GPT."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/gizmos/bootstrap")
+    r.raise_for_status()
+    out = []
+    for it in r.json().get("gizmos", []):
+        g    = (it.get("resource") or {}).get("gizmo") or it.get("gizmo") or it
+        disp = g.get("display") or {}
+        out.append({
+            "id":              g.get("id"),
+            "name":            disp.get("name"),
+            "description":     disp.get("description"),
+            "prompt_starters": disp.get("prompt_starters"),
+            "short_url":       g.get("short_url"),
+            "voice":           (g.get("voice") or {}).get("id"),
+        })
+    return {"gizmos": out}
+
+
+@app.get("/v1/gizmos/{gizmo_id}")
+async def gizmo_detail(gizmo_id: str, request: Request):
+    """Detail of one custom GPT (instructions, starters, config)."""
+    if not auth.is_authenticated():
+        return _needs_account()
+    r = await _backend_get(request, "/backend-api/gizmos/" + gizmo_id)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200]}
+        return JSONResponse(status_code=r.status_code,
+                            content={"error": {"type": "gizmo_error", "detail": detail}})
+    return r.json()
 
 
 @app.get("/v1/conversations")

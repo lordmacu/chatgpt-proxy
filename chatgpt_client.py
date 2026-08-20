@@ -160,8 +160,11 @@ class ChatGPTSession:
         "gpt-3.5-turbo": "gpt-5-3-mini",
     }
 
-    def __init__(self, system_prompt: str = ""):
+    def __init__(self, system_prompt: str = "", gizmo_id: Optional[str] = None):
         self.system_prompt = system_prompt
+        # When set (a "g-..." id), every turn runs as that custom GPT and the
+        # proxy's own system_prompt is left out -- the GPT's instructions govern.
+        self.gizmo_id      = gizmo_id
         self._first_turn   = True
         self.device_id     = str(uuid.uuid4())
         self.client        = httpx.AsyncClient(
@@ -260,7 +263,13 @@ class ChatGPTSession:
 
     @classmethod
     def _resolve_model(cls, requested: str) -> str:
-        """Translate legacy aliases to the real backend slug."""
+        """Translate legacy aliases to the real backend slug.
+
+        A gizmo id ("g-...") is NOT a model slug: the GPT runs on a base model and
+        is selected via conversation_mode, so it maps to "auto" here.
+        """
+        if isinstance(requested, str) and requested.startswith("g-"):
+            return "auto"
         return cls._MODEL_MAP.get(requested, requested)
 
     async def stream_message(
@@ -297,7 +306,8 @@ class ChatGPTSession:
         # Build final text: system (first turn only) + files + message
         msg_parts = []
         if self._first_turn and self.system_prompt:
-            msg_parts.append(f"[System instructions: {self.system_prompt}]")
+            if not self.gizmo_id:  # a GPT brings its own instructions
+                msg_parts.append(f"[System instructions: {self.system_prompt}]")
             self._first_turn = False
         if json_mode:
             msg_parts.append(
@@ -359,6 +369,9 @@ class ChatGPTSession:
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.gizmo_id:
+            body["conversation_mode"] = {"kind": "gizmo_interaction",
+                                         "gizmo_id": self.gizmo_id}
         if self.conversation_id:
             body["conversation_id"] = self.conversation_id
 
@@ -871,28 +884,31 @@ class SessionPool:
         self._pool: dict[str, ChatGPTSession] = {}
 
     @staticmethod
-    def _key(messages: list[dict], system_prompt: str = "") -> str:
+    def _key(messages: list[dict], system_prompt: str = "", gizmo_id: str = "") -> str:
         """
         Key = hash of history EXCEPT the last user message.
-        Includes system_prompt so different instructions use separate sessions.
+        Includes system_prompt AND gizmo_id so different instructions / different
+        GPTs use separate sessions (never continue one GPT's thread as another).
         """
         history = [m for m in messages if not (m == messages[-1] and m.get("role") == "user")]
-        if not history and not system_prompt:
+        if not history and not system_prompt and not gizmo_id:
             return "new_" + str(uuid.uuid4())  # always new session with no history
-        canonical = json.dumps(history, sort_keys=True, ensure_ascii=False) + system_prompt
+        canonical = (json.dumps(history, sort_keys=True, ensure_ascii=False)
+                     + system_prompt + "\x00" + (gizmo_id or ""))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
-    async def get(self, messages: list[dict], system_prompt: str = "") -> tuple[str, "ChatGPTSession"]:
-        key = self._key(messages, system_prompt)
+    async def get(self, messages: list[dict], system_prompt: str = "",
+                  gizmo_id: Optional[str] = None) -> tuple[str, "ChatGPTSession"]:
+        key = self._key(messages, system_prompt, gizmo_id or "")
         await self._evict_stale()
         if key.startswith("new_") or key not in self._pool:
-            session = ChatGPTSession(system_prompt=system_prompt)
+            session = ChatGPTSession(system_prompt=system_prompt, gizmo_id=gizmo_id)
             self._pool[key] = session
         elif self._pool[key].quota_exhausted:
             # Previous session hit its limit — create a fresh one with a new device_id
             _log(f"session {key[:8]} quota_exhausted → fresh device_id")
             await self._pool[key].close()
-            self._pool[key] = ChatGPTSession(system_prompt=system_prompt)
+            self._pool[key] = ChatGPTSession(system_prompt=system_prompt, gizmo_id=gizmo_id)
         return key, self._pool[key]
 
     async def _evict_stale(self):
