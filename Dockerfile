@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # reaching port 8890. Both main.py and chatgpt_client.py import it. Adding a module
 # to the codebase does NOT add it to the image: this line is the whole manifest,
 # and it has to be updated by hand whenever a new local module appears.
-COPY chatgpt_client.py main.py auth.py ./
+COPY chatgpt_client.py main.py auth.py dpop.py session_web.py ./
 
 ENV PYTHONUNBUFFERED=1
 
