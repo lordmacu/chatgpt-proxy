@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
 from chatgpt_client import (
-    SessionPool, fetch_anon_models, BASE, _base_headers,
+    SessionPool, ChatGPTSession, fetch_anon_models, BASE, _base_headers,
     QuotaExceededError, _extract_json, _IMAGE_STORE_DIR,
 )
 import httpx as _httpx
@@ -1763,6 +1763,31 @@ _AUDIO_BASE_URL  = (os.environ.get("AUDIO_BASE_URL")
                     or os.environ.get("IMAGE_BASE_URL", "")).rstrip("/")
 _AUDIO_EXT = {"mp3": ".mp3", "aac": ".aac", "opus": ".opus", "wav": ".wav", "ogg": ".ogg"}
 
+# Free-text TTS: synthesize only reads back an assistant message, so /v1/audio/speech
+# first has the model echo the text verbatim, then synthesizes that reply.
+_VERBATIM_PROMPT = (
+    "Devolvé ÚNICAMENTE el siguiente texto, palabra por palabra, exactamente igual, "
+    "sin agregar, quitar ni cambiar nada, sin comillas, sin prefijos ni explicaciones:\n\n{t}"
+)
+
+
+def _store_audio(content: bytes, key: str, voice: str, fmt: str, media: str) -> dict:
+    """Save TTS bytes to _AUDIO_STORE_DIR and return {url, content_type, bytes}."""
+    _AUDIO_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    ext      = _AUDIO_EXT.get(fmt.lower(), ".mp3")
+    filename = f"{key}-{voice}{ext}"
+    (_AUDIO_STORE_DIR / filename).write_bytes(content)
+    served = (f"{_AUDIO_BASE_URL}/audio/{filename}" if _AUDIO_BASE_URL
+              else f"/audio/{filename}")
+    return {"url": served, "content_type": media, "bytes": len(content)}
+
+
+class SpeechRequest(BaseModel):
+    input:  str
+    voice:  str = "juniper"
+    format: str = "mp3"
+    model:  str = "auto"
+
 
 @app.get("/v1/audio/from-message")
 async def audio_from_message(
@@ -1821,21 +1846,71 @@ async def audio_from_message(
         return Response(content=r.content, media_type=media)
 
     # Default: save the file and hand back a URL, exactly like generated images.
-    _AUDIO_STORE_DIR.mkdir(parents=True, exist_ok=True)
-    ext      = _AUDIO_EXT.get(format.lower(), ".mp3")
-    filename = f"{message_id[:36]}-{voice}{ext}"
-    (_AUDIO_STORE_DIR / filename).write_bytes(r.content)
-    served = (f"{_AUDIO_BASE_URL}/audio/{filename}" if _AUDIO_BASE_URL
-              else f"/audio/{filename}")
-    return {
-        "url":             served,
-        "conversation_id": conversation_id,
-        "message_id":      message_id,
-        "voice":           voice,
-        "format":          format,
-        "content_type":    media,
-        "bytes":           len(r.content),
-    }
+    stored = _store_audio(r.content, message_id[:36], voice, format, media)
+    return {**stored, "conversation_id": conversation_id, "message_id": message_id,
+            "voice": voice, "format": format}
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: SpeechRequest, request: Request):
+    """Free-text TTS: give it `input` and get back an mp3 URL.
+
+    synthesize can only read an assistant message, so this first makes the model
+    echo `input` verbatim (a throwaway conversation), verifies the reply matches,
+    then synthesizes it. Costs one chat message per call. Returns the audio URL,
+    the `text` actually synthesized, and `exact_match` (false if the model altered
+    the text -- audio is still returned so you can decide). Voices: juniper, cove,
+    ember, breeze, maple, vale, glimmer, orbit, fathom, ridge.
+
+    body: { "input": "...", "voice": "juniper", "format": "mp3", "model": "auto" }
+    """
+    text = (req.input or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "'input' is required", "type": "invalid_request_error"}})
+
+    # Have the model reproduce the text; retry once if it isn't verbatim.
+    session = None
+    reply = ""
+    try:
+        for attempt in (1, 2):
+            if session:
+                await session.close()
+            session = ChatGPTSession()
+            reply = "".join([frag async for frag in session.stream_message(
+                _VERBATIM_PROMPT.format(t=text), model=req.model)]).strip()
+            if reply == text:
+                break
+        exact = reply == text
+
+        cid, mid = session.conversation_id, session.parent_message_id
+        if not cid or not mid:
+            return JSONResponse(status_code=502, content={"error": {
+                "message": "no se pudo obtener el mensaje a sintetizar", "type": "upstream_error"}})
+
+        prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
+        path   = prefix + "/synthesize"
+        r = await session.client.get(f"{BASE}{path}",
+            headers={**_base_headers(session.device_id), "X-OpenAI-Target-Path": path},
+            params={"conversation_id": cid, "message_id": mid,
+                    "voice": req.voice, "format": req.format})
+    finally:
+        if session:
+            await session.close()
+
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200]}
+        return JSONResponse(status_code=r.status_code,
+                            content={"error": {"type": "synthesize_error", "detail": detail}})
+
+    media  = r.headers.get("content-type", "audio/mpeg")
+    stored = _store_audio(r.content, mid[:36], req.voice, req.format, media)
+    return {**stored, "text": reply, "exact_match": exact,
+            "voice": req.voice, "format": req.format,
+            "conversation_id": cid, "message_id": mid}
 
 
 @app.get("/audio/{filename}", include_in_schema=False)
