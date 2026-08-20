@@ -5,6 +5,7 @@ Endpoints — [A] works anonymously, [L] needs a logged-in account.
 `GET /health` reports which mode is live as auth_mode: "anonymous" | "account".
 
   [A] POST /v1/chat/completions        — chat (streaming + non-streaming, files)
+  [A] POST /v1/tool-calls              — resolve a request into function calls, stateless
   [A] GET  /v1/models                  — models available in the current mode
   [A] GET  /v1/session/me              — session info (user id, device id)
   [A] GET  /v1/limits                  — per-feature remaining counts
@@ -36,23 +37,46 @@ Chat capabilities — anonymous | account:
   ❌|✅ Reasoning models (gpt-5-4-t-mini, gpt-5-6-t-mini), research, custom GPTs
   ❌|✅ Image generation, TTS, speech-to-text
   ❌|❌ Image input (vision) — not exposed on this endpoint
-  ❌|❌ Function calling / tool_calls in the response — see below
+  ✅|✅ Function calling / tool_calls — emulated, see below
   ❌|❌ temperature, top_p, max_tokens, penalties, stop, seed, n — see below
 
-OpenAI `tools` field compatibility (input-only):
-  The `tools` array is accepted for compatibility, but the backend never returns
-  tool_calls: its tools run server-side (search, canvas, image gen, connectors,
-  MCP) and surface as text/widgets, never as a function the caller must execute.
-  Tool *names* are therefore used only to pick which server-side mode to turn on.
-  The names below match the `enabled_tools` list the upstream /models endpoint
-  reports for each model — currently ["tools", "tools2", "search", "canvas",
-  "app_pairing", "image_gen_tool_enabled"]:
-    • "web_search" / "search" / ...       → force_use_search = true
-    • "canvas" / "text_editor"            → force_use_canvas = true
-    • "chatgpt_tools" / "tools" / ...     → force_use_tools  = true
-    • any other name                       → force_use_tools  = true
-    • tool_choice: "none"                  → disables all three modes
-  The response is always text in choices[0].message.content, never tool_calls.
+OpenAI `tools` field:
+  Two different things arrive in one array, and they are handled differently.
+
+  a) Built-in names select a ChatGPT mode. These run server-side and come back
+     as text or widgets, never as something the caller executes. The names match
+     the `enabled_tools` list upstream reports per model — currently ["tools",
+     "tools2", "search", "canvas", "app_pairing", "image_gen_tool_enabled"]:
+       • "web_search" / "search" / ...   → force_use_search = true
+       • "canvas" / "text_editor"        → force_use_canvas = true
+       • "chatgpt_tools" / "tools" / ... → force_use_tools  = true
+
+  b) Anything else is the caller's own function, and the proxy emulates real
+     function calling for it: the turn is resolved by a separate stateless
+     extraction (tool_calls.py) and comes back as choices[0].message.tool_calls
+     with finish_reason "tool_calls", streaming included. Send the results back
+     as role:"tool" messages and the next request answers in prose. The official
+     OpenAI SDK drives the whole loop unmodified.
+       • tool_choice: "none"     → no extraction, no modes, plain chat
+       • tool_choice: "required" → the model may not decline to call
+       • tool_choice: {...}      → that function or nothing
+       • tool_emulation: false   → (b) off; custom names then do nothing
+       • tool_verify: true       → +1 message auditing the call for a dropped
+                                   condition, worth it on dense requests
+
+  Cost: emulation spends one extra upstream message per turn that declares
+  custom functions, because the decision is a request of its own. A turn where
+  no function fits therefore costs two messages (decide, then answer). The
+  X-Proxy-Tool-Extraction and X-Proxy-Tool-Requests response headers report
+  what happened and what it cost.
+
+  What emulation does NOT recover: a required argument the request never states
+  is answered with a question rather than a guess (status "need_info"), and a
+  request packing many conditions can still drop one — see tool_calls.py for the
+  measurements behind both.
+
+  POST /v1/tool-calls exposes the extractor on its own, for a caller that wants
+  the decision without a conversation attached.
 
 Sampling parameters:
   The conversation protocol has no temperature / top_p / max_tokens / penalties —
@@ -88,6 +112,7 @@ from chatgpt_client import (
 import httpx as _httpx
 
 import auth
+import tool_calls as _tc
 
 # ---------------------------------------------------------------------------
 # Per-user stores  {user_id: {file_id: {...}}}  /  {user_id: SessionPool}
@@ -141,8 +166,18 @@ class ContentPart(BaseModel):
 
 class Message(BaseModel):
     role:    str
-    content: Union[str, List[ContentPart]] = ""
+    # None is not an oddity to tolerate, it is what every OpenAI SDK sends back:
+    # an assistant turn that called a function has content: null, and rejecting
+    # it 422s the second leg of every round trip.
+    content: Union[str, List[ContentPart], None] = ""
     name:    Optional[str] = None
+
+    # The two fields a function-calling round trip travels on. Without them
+    # pydantic drops the assistant's calls and the tool's answer on the floor,
+    # and the second request of the loop re-answers the original question as if
+    # the tool had never run.
+    tool_calls:   Optional[List[dict]] = None   # on role="assistant"
+    tool_call_id: Optional[str] = None          # on role="tool"
 
 
 # Built-in tool names that this proxy recognises in the OpenAI tools array.
@@ -153,6 +188,9 @@ _BUILTIN_TOOL_WEB_SEARCH = {"web_search", "search", "brave_search", "bing_search
 _BUILTIN_TOOL_CANVAS     = {"canvas", "text_editor"}
 _BUILTIN_TOOL_ALL        = {"chatgpt_tools", "all_tools", "builtin_tools",
                             "tools", "tools2", "app_pairing"}
+# Everything above names a mode that runs inside ChatGPT. Anything else in the
+# tools array is the caller's own function, which tool_calls.py emulates.
+_BUILTIN_TOOL_NAMES      = _BUILTIN_TOOL_WEB_SEARCH | _BUILTIN_TOOL_CANVAS | _BUILTIN_TOOL_ALL
 
 # Sampling fields the OpenAI schema defines and this backend has no equivalent
 # for. Accepted so stock clients keep working, reported back in a header so the
@@ -199,6 +237,14 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Union[str, dict]] = None
 
     # ── Proxy-specific extensions ──────────────────────────────────────────────
+    # tool_emulation: false turns custom function calling off for this request —
+    # the tools array then only picks a server-side mode, as it did before the
+    # emulation existed. Default follows the TOOL_EMULATION env var.
+    tool_emulation:   Optional[bool] = Field(default=None)
+    # tool_verify: spend a second upstream message auditing the extracted call
+    # against the original request. Worth it when a request packs many
+    # conditions, since that is the case where one silently goes missing.
+    tool_verify:      bool = Field(default=False)
     # web_search: true/false/null — direct override of force_use_search
     web_search:       Optional[bool] = Field(default=None)
     # force_use_tools: true/null — direct override of force_use_tools
@@ -260,9 +306,13 @@ class ChatCompletionRequest(BaseModel):
             }
             has_search = bool(names & _BUILTIN_TOOL_WEB_SEARCH)
             has_canvas = bool(names & _BUILTIN_TOOL_CANVAS)
-            # Names that map onto no specific mode still mean "the caller wants
-            # tools", which upstream only understands as force_use_tools.
-            generic    = names - _BUILTIN_TOOL_WEB_SEARCH - _BUILTIN_TOOL_CANVAS
+            # Only the names that really mean "ChatGPT's own tools" switch that
+            # mode on. A caller's custom function used to land here too, which
+            # was actively harmful: with the backend's tools running, the model
+            # answers the question itself instead of delegating to the function
+            # (measured — weather prompts came back from web search, not as a
+            # call). Custom names are emulated by tool_calls.py instead.
+            generic    = bool(names & _BUILTIN_TOOL_ALL)
 
             if has_search and search is None:
                 search = True
@@ -988,7 +1038,9 @@ def _make_completion(content, model: str, completion_id: str) -> dict:
 
 
 def _msg_to_text(m: "Message") -> str:
-    """Extract plain text from a message (str or list of ContentPart)."""
+    """Extract plain text from a message (str, list of ContentPart, or None)."""
+    if m.content is None:
+        return ""
     if isinstance(m.content, str):
         return m.content
     if isinstance(m.content, list):
@@ -996,10 +1048,35 @@ def _msg_to_text(m: "Message") -> str:
     return ""
 
 
+def _call_signature(call: dict) -> tuple[str, str]:
+    """(name, arguments-as-text) for one OpenAI tool_call."""
+    fn   = (call or {}).get("function") or {}
+    args = fn.get("arguments")
+    if not isinstance(args, str):
+        args = json.dumps(args or {}, ensure_ascii=False)
+    return fn.get("name", "?"), args
+
+
+def _tool_call_index(messages: List[Message]) -> dict[str, tuple[str, str]]:
+    """{tool_call_id: (name, arguments)} — lets a result name what it answers."""
+    index = {}
+    for m in messages:
+        for call in (m.tool_calls or []):
+            if isinstance(call, dict) and call.get("id"):
+                index[call["id"]] = _call_signature(call)
+    return index
+
+
+def _describe_tool_calls(m: Message) -> str:
+    """An assistant turn that called functions, written out for the prompt."""
+    parts = [f"{n}({a})" for n, a in (_call_signature(c) for c in (m.tool_calls or []))]
+    return "called " + ", ".join(parts) if parts else ""
+
+
 def _resolve_messages(
     messages: List[Message],
     user_files: dict[str, dict],
-) -> tuple[str, str, List[str], List[dict]]:
+) -> tuple[str, str, List[str], List[dict], bool]:
     """
     Extract:
       - system_prompt: content of the system role message
@@ -1009,6 +1086,10 @@ def _resolve_messages(
       - image_parts: OpenAI image_url parts on the last user message (vision
         input); each is the raw {"url": ..., "detail"?: ...} dict, uploaded and
         attached later by the caller. Requires an authenticated account.
+      - tool_followup: the array ENDS in tool results, i.e. this request is the
+        second leg of a function-calling round trip. The caller has already run
+        the functions and wants the answer, so the turn to send is the results,
+        not the user message that triggered them.
     """
     system_prompt = ""
     file_texts: List[str] = []
@@ -1017,6 +1098,18 @@ def _resolve_messages(
     for m in messages:
         if m.role == "system":
             system_prompt = _msg_to_text(m)
+
+    # Tool results are trailing when they close the array: [.., assistant(calls), tool, tool]
+    trailing_tools: List[Message] = []
+    for m in reversed(messages):
+        if m.role != "tool":
+            break
+        trailing_tools.insert(0, m)
+
+    if trailing_tools:
+        return (system_prompt,
+                _tool_followup_text(messages, trailing_tools),
+                file_texts, image_parts, True)
 
     user_msgs = [m for m in messages if m.role == "user"]
     if not user_msgs:
@@ -1045,18 +1138,8 @@ def _resolve_messages(
                 if iu.get("url"):
                     image_parts.append(iu)
 
-    # Inject prior history (user + assistant) as context in the message
-    prior_turns = []
-    for m in messages:
-        if m is last:
-            break
-        if m.role not in ("user", "assistant"):
-            continue
-        text = _msg_to_text(m).strip()
-        if not text:
-            continue
-        label = "User" if m.role == "user" else "Assistant"
-        prior_turns.append(f"{label}: {text}")
+    # Inject prior history (user + assistant + tool round trips) as context
+    prior_turns = _history_lines(messages, stop_at=last)
 
     if prior_turns:
         history_block  = "\n".join(prior_turns)
@@ -1068,7 +1151,65 @@ def _resolve_messages(
     if not last_user_text and not image_parts:
         raise HTTPException(400, "Last user message is empty")
 
-    return system_prompt, last_user_text, file_texts, image_parts
+    return system_prompt, last_user_text, file_texts, image_parts, False
+
+
+def _history_lines(messages: List[Message], stop_at: Optional[Message] = None) -> List[str]:
+    """Prior turns as prompt lines. Function calls and their results included.
+
+    A round trip that loses the tool leg is worse than one that never called a
+    tool: the model sees the original question again with no answer attached and
+    simply re-answers it, so the caller's function ran for nothing.
+    """
+    index = _tool_call_index(messages)
+    lines: List[str] = []
+    for m in messages:
+        if stop_at is not None and m is stop_at:
+            break
+        if m.role == "tool":
+            fn = index.get(m.tool_call_id or "", ("tool", ""))[0]
+            lines.append(f"Tool result ({fn}): {_msg_to_text(m).strip()}")
+            continue
+        if m.role not in ("user", "assistant"):
+            continue
+        text = _msg_to_text(m).strip()
+        if m.role == "assistant" and m.tool_calls:
+            described = _describe_tool_calls(m)
+            lines.append(f"Assistant: {text} [{described}]".replace(":  [", ": [")
+                         if text else f"Assistant: [{described}]")
+            continue
+        if not text:
+            continue
+        lines.append(("User: " if m.role == "user" else "Assistant: ") + text)
+    return lines
+
+
+def _tool_followup_text(messages: List[Message], trailing: List[Message]) -> str:
+    """The turn to send when the caller has just run the functions.
+
+    The results lead, the conversation that produced them follows as context,
+    and the instruction is explicit about not calling the same thing twice --
+    otherwise the model happily emits the call it already got an answer for.
+    """
+    index   = _tool_call_index(messages)
+    history = _history_lines(messages, stop_at=trailing[0])
+    # Written as plain lines, not as JSON carrying JSON: a result nested inside
+    # an envelope comes out double-escaped, which is exactly the shape the model
+    # reads worst.
+    results = []
+    for m in trailing:
+        name, args = index.get(m.tool_call_id or "", ("tool", ""))
+        results.append(f"{name}({args}) -> {_msg_to_text(m).strip()}")
+    block = "\n".join(results)
+    parts = []
+    if history:
+        parts.append("[Prior conversation — use this as context:\n" + "\n".join(history) + "\n]")
+    parts.append(
+        f"[Function results — you asked for these and they came back:\n{block}\n]\n\n"
+        "Answer the user's request using these results. Do not call the same function "
+        "again unless something genuinely new is needed, and never invent a result."
+    )
+    return "\n\n".join(parts)
 
 
 # --- Vision input (image_url parts) ----------------------------------------
@@ -1469,6 +1610,50 @@ def _build_search_metadata(session) -> dict:
     }
 
 
+def _tool_calls_completion(calls: list, model: str, completion_id: str) -> dict:
+    """A chat.completion whose choice is a set of calls for the caller to run."""
+    return {
+        "id":      completion_id,
+        "object":  "chat.completion",
+        "created": int(time.time()),
+        "model":   model,
+        "choices": [{
+            "index":         0,
+            "message":       {"role": "assistant", "content": None, "tool_calls": calls},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": -1, "completion_tokens": -1, "total_tokens": -1},
+    }
+
+
+def _tool_calls_stream(calls: list, model: str, completion_id: str):
+    """The same result as SSE. One delta per call, then finish_reason tool_calls.
+
+    Each delta carries the whole function object rather than dribbling the
+    arguments out character by character: the extraction is already complete
+    when this runs, so splitting it would fake a progress the proxy does not
+    have, and every OpenAI client accumulates by `index` either way.
+    """
+    def gen():
+        head = {"id": completion_id, "object": "chat.completion.chunk",
+                "created": int(time.time()), "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant"},
+                             "finish_reason": None}]}
+        yield f"data: {json.dumps(head)}\n\n".encode()
+        for i, call in enumerate(calls):
+            delta = {"id": completion_id, "object": "chat.completion.chunk",
+                     "created": int(time.time()), "model": model,
+                     "choices": [{"index": 0, "finish_reason": None,
+                                  "delta": {"tool_calls": [{"index": i, **call}]}}]}
+            yield f"data: {json.dumps(delta)}\n\n".encode()
+        tail = {"id": completion_id, "object": "chat.completion.chunk",
+                "created": int(time.time()), "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+        yield f"data: {json.dumps(tail)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+    return gen()
+
+
 def _quota_error_payload() -> dict:
     return {
         "error": {
@@ -1495,7 +1680,63 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         return await _image_via_chat_completions(req, pool, msgs_raw, completion_id)
     json_mode = req.is_json_mode()
 
-    system_prompt, last_user_text, file_texts, image_parts = _resolve_messages(req.messages, uf)
+    system_prompt, last_user_text, file_texts, image_parts, tool_followup = \
+        _resolve_messages(req.messages, uf)
+
+    # ── Custom function calling ────────────────────────────────────────────────
+    # The caller declared functions of its own, so this turn may be a call rather
+    # than an answer. Resolved by a separate stateless extraction (see
+    # tool_calls.py for why it cannot ride along inside the conversation), and
+    # only on the FIRST leg: once the results are back, the job is to answer.
+    functions = _tc.custom_functions(req.tools, _BUILTIN_TOOL_NAMES)
+    emulate   = req.tool_emulation if req.tool_emulation is not None else _tc.EMULATION_ENABLED
+    if (functions and emulate and not tool_followup
+            and req.tool_choice != "none" and not image_parts):
+        try:
+            extraction = await _tc.extract(
+                functions, last_user_text, req.tool_choice or "auto",
+                verify=req.tool_verify,
+            )
+        except QuotaExceededError:
+            raise HTTPException(429, detail=_quota_error_payload())
+
+        head = {"X-Proxy-Tool-Extraction": extraction.status,
+                "X-Proxy-Tool-Requests":   str(extraction.requests)}
+        if extraction.status == "calls":
+            cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+            if req.stream:
+                return StreamingResponse(
+                    _tool_calls_stream(extraction.tool_calls, req.model, cid),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **head},
+                )
+            return JSONResponse(
+                _tool_calls_completion(extraction.tool_calls, req.model, cid), headers=head,
+            )
+        if extraction.status == "need_info":
+            # OpenAI has no wire format for "ask the user for the missing
+            # argument", so the turn falls through to a normal answer -- but it
+            # has to fall through as a QUESTION. Left alone the model fills the
+            # gap itself: asked "what is the temperature?" with no city it
+            # answered for Bogotá, from web search. So the gap is named in the
+            # prompt and the backend's search is shut off for this turn.
+            missing = (extraction.need_info or {}).get("missing") or []
+            if missing:
+                last_user_text = (
+                    "[You cannot answer this yet: the request does not state "
+                    + ", ".join(str(x) for x in missing) +
+                    ". Ask the user for exactly that, in their language, in one short "
+                    "sentence. Do not guess it and do not answer from your own knowledge.]\n\n"
+                    + last_user_text
+                )
+                req.web_search = False
+            head["X-Proxy-Tool-Need-Info"] = json.dumps(extraction.need_info or {},
+                                                        ensure_ascii=False)[:900]
+        # "no_call" falls through too: no declared function fits, so this is an
+        # ordinary chat turn and the caller gets prose, exactly as it should.
+        _tool_headers = head
+    else:
+        _tool_headers = {}
 
     # Vision input needs a real account (the anonymous backend has no file
     # upload). Fail fast before spending a message or uploading anything.
@@ -1519,6 +1760,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     # see they were dropped instead of assuming they took effect.
     ignored = req.ignored_params()
     extra_headers = {"X-Proxy-Ignored-Params": ",".join(ignored)} if ignored else {}
+    # An extraction that decided "no call" (or that needs an argument) still
+    # reports itself, so a caller can account for the message it cost.
+    extra_headers.update(_tool_headers)
 
     if req.stream:
         async def event_stream() -> AsyncGenerator[bytes, None]:
@@ -1674,6 +1918,68 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         if service_tier:
             resp["service_tier"] = service_tier
         return JSONResponse(resp, headers=extra_headers)
+
+
+# ---------------------------------------------------------------------------
+# /v1/tool-calls
+# ---------------------------------------------------------------------------
+
+class ToolCallsRequest(BaseModel):
+    """Resolve one request into function calls. Stateless: no conversation, no
+    history, no session reuse — which is exactly why it is reliable."""
+    tools:       List[dict]
+    input:       Optional[str] = None
+    messages:    Optional[List[Message]] = None
+    tool_choice: Optional[Union[str, dict]] = "auto"
+    # Defaults to the extractor model rather than "auto": measured at the same
+    # accuracy with a much shorter latency tail.
+    model:       Optional[str] = None
+    verify:      bool = False
+
+
+@app.post("/v1/tool-calls")
+async def tool_calls_endpoint(req: ToolCallsRequest, request: Request):
+    functions = _tc.custom_functions(req.tools, _BUILTIN_TOOL_NAMES)
+    if not functions:
+        raise HTTPException(400, detail={"error": {
+            "message": "No custom functions in `tools`. Built-in names "
+                       f"({', '.join(sorted(_BUILTIN_TOOL_NAMES))}) select a ChatGPT "
+                       "mode on /v1/chat/completions and have nothing to extract.",
+            "type": "invalid_request_error", "param": "tools",
+        }})
+
+    text = req.input or ""
+    if not text and req.messages:
+        uf = _user_files(_get_user_id(request))
+        _system, text, _files, _images, _followup = _resolve_messages(req.messages, uf)
+    if not text.strip():
+        raise HTTPException(400, detail={"error": {
+            "message": "Provide `input` (a string) or `messages`.",
+            "type": "invalid_request_error", "param": "input",
+        }})
+
+    try:
+        extraction = await _tc.extract(functions, text, req.tool_choice or "auto",
+                                       model=req.model, verify=req.verify)
+    except QuotaExceededError:
+        raise HTTPException(429, detail=_quota_error_payload())
+
+    body = {
+        "id":      f"toolcall-{uuid.uuid4().hex[:24]}",
+        "object":  "tool_calls",
+        "created": int(time.time()),
+        "model":   req.model or _tc.EXTRACTOR_MODEL,
+        "status":  extraction.status,          # calls | no_call | need_info
+        "tool_calls": extraction.tool_calls,
+        # Spent upstream messages, not tokens: on this backend the message is
+        # the quota unit, so it is the number a caller can actually budget.
+        "usage":   {"upstream_requests": extraction.requests},
+    }
+    if extraction.status == "need_info":
+        body["need_info"] = extraction.need_info
+    if extraction.notes:
+        body["notes"] = [n for n in extraction.notes if isinstance(n, str)]
+    return JSONResponse(body)
 
 
 # ---------------------------------------------------------------------------

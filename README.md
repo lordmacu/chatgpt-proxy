@@ -267,19 +267,21 @@ OpenAI-compatible chat completions.
 | `force_use_tools` | boolean | `null` | Enable advanced tools |
 | `force_use_canvas` | boolean | `null` | Enable Canvas mode |
 | `tools` | array | — | OpenAI tools format (see note) |
-| `tool_choice` | string | — | `"none"` disables all modes |
+| `tool_choice` | string/object | — | `"none"` \| `"auto"` \| `"required"` \| `{"type":"function",...}` |
+| `tool_emulation` | boolean | `true` | `false` turns custom function calling off |
+| `tool_verify` | boolean | `false` | Spend one extra message auditing the call for a dropped condition |
 | `reasoning_effort` | string | `null` | `minimal`/`low` → `standard`, `medium` → `extended`, `high` → `max` |
 | `thinking_effort` | string | `null` | Native form: `standard` \| `extended` \| `max` |
 | `service_tier` | string | `null` | `auto`/`default`/`flex`/`scale` → `standard`; `priority` passes through |
 | `force_disable_features` | array | — | Feature names to switch off for this turn |
 | `temperature`, `max_tokens`, `top_p`, etc. | — | — | Accepted, dropped (see note) |
 
-> **Note on `tools`:** The backend doesn't execute caller-supplied functions — its tools
-> run server-side and it never returns `tool_calls`. Tool *names* only pick which
-> server-side mode to switch on, using the same names upstream reports in each model's
-> `enabled_tools`: `web_search`/`search` → web search, `canvas` → Canvas,
-> `tools`/`chatgpt_tools`/any other name → advanced tools. `tool_choice: "none"`
-> disables all three.
+> **Note on `tools`:** two different things share this array.
+> **Built-in names** switch on a ChatGPT mode that runs server-side, using the same names
+> upstream reports in each model's `enabled_tools`: `web_search`/`search` → web search,
+> `canvas` → Canvas, `tools`/`chatgpt_tools` → advanced tools.
+> **Any other name is your own function**, and the proxy returns real `tool_calls` for it
+> (see [Function calling](#function-calling)). `tool_choice: "none"` disables everything.
 
 > **Note on sampling parameters:** `temperature`, `top_p`, `max_tokens`,
 > `presence_penalty`, `frequency_penalty`, `stop`, `seed` and `n` have no equivalent
@@ -591,17 +593,65 @@ custom GPTs, TTS, and image generation.
 | Text-to-speech | ❌ | ✅ |
 | Speech-to-text | ❌ | ✅ |
 | Image input (vision, `image_url`) | ❌ | ✅ |
-| Function calling (`tool_calls` in the response) | ❌ | ❌ |
+| Function calling (`tool_calls` in the response) | ✅ | ✅ |
 | `temperature`, `top_p`, `max_tokens`, penalties, `seed`, `n` | ❌ | ❌ |
 
 Vision accepts OpenAI-style `image_url` parts (`data:` URLs or `http(s)` URLs);
 each image is uploaded to the account's file store and attached to the message.
 It needs an account — the anonymous backend has no file upload — so an image with
-no token is a fast `401`. The last two rows are ❌ in *both* modes and won't change
-with an account: the backend's tools run server-side so it never returns
-`tool_calls`, and the conversation protocol simply has no sampling fields — those are
+no token is a fast `401`. Sampling parameters are ❌ in *both* modes and won't change
+with an account: the conversation protocol simply has no such fields, so they are
 accepted and then dropped, with an `X-Proxy-Ignored-Params` response header listing
 which ones.
+
+### Function calling
+
+The backend has no native function calling — it is emulated, and the official OpenAI
+SDK drives the loop unmodified:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
+
+TOOLS = [{"type": "function", "function": {
+    "name": "get_weather", "description": "Weather for a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                   "required": ["city"]}}}]
+
+msgs = [{"role": "user", "content": "What's the weather in Bogotá?"}]
+r = client.chat.completions.create(model="auto", messages=msgs, tools=TOOLS)
+# r.choices[0].finish_reason == "tool_calls"
+
+msgs.append(r.choices[0].message)
+for call in r.choices[0].message.tool_calls:
+    msgs.append({"role": "tool", "tool_call_id": call.id,
+                 "content": '{"temperature": 14}'})
+client.chat.completions.create(model="auto", messages=msgs, tools=TOOLS)
+# -> "In Bogotá it's 14 °C."
+```
+
+Streaming, parallel calls, `tool_choice: "required"` and a pinned function all work.
+Two things to know:
+
+- **It costs one extra upstream message** per turn that declares custom functions:
+  deciding *whether* to call is a request of its own, so a turn where no function fits
+  spends two. `X-Proxy-Tool-Extraction` and `X-Proxy-Tool-Requests` report what happened.
+- **A required argument the request never states is answered with a question**, not a
+  guess. Dense requests packing many conditions can still drop one — `tool_verify: true`
+  spends a message auditing for exactly that.
+
+`POST /v1/tool-calls` exposes the same decision on its own, with no conversation
+attached — useful when you want the call and will run the conversation elsewhere:
+
+```bash
+curl -X POST http://localhost:8000/v1/tool-calls \
+  -H 'Content-Type: application/json' \
+  -d '{"tools": [...], "input": "weather in Lima and Quito"}'
+# {"status": "calls", "tool_calls": [...], "usage": {"upstream_requests": 1}}
+```
+
+`status` is `calls`, `no_call`, or `need_info` (with `need_info.missing` naming the
+parameters the request left out).
 
 ### Endpoints
 
@@ -612,6 +662,7 @@ which ones.
 | `GET /v1/models` | ✅ | ✅ | Shorter list anonymously — see below |
 | `GET /v1/session/me` | ✅ | ✅ | Identity is `ua-...` vs `user-...` |
 | `POST /v1/chat/completions` | ✅ | ✅ | Except `model: "g-..."` (custom GPTs) |
+| `POST /v1/tool-calls` | ✅ | ✅ | Stateless function-call extraction |
 | `POST` / `GET` / `DELETE /v1/files` | ✅ | ✅ | Proxy-local store, never touches the account |
 | `GET /v1/limits` | ✅ | ✅ | Per-feature remaining counts |
 | `POST /v1/translate` | ✅ | ✅ | Doesn't spend a chat message |
