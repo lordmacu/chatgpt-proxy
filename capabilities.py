@@ -135,10 +135,10 @@ def snapshot(_resolve=None, _now=None) -> AccountState:
     a capability we cannot confirm sends real traffic into a wall.
 
     `_resolve` and `_now` are injection points for tests; production passes
-    neither.
+    neither, so the installed `_resolver` (see `set_resolver`) is used.
     """
     global _state, _resolved_at
-    resolve = _resolve or _resolve_from_vendor
+    resolve = _resolve or _resolver
     now = time.time() if _now is None else _now
     with _lock:
         if _state is not None and (now - _resolved_at) < REFRESH_INTERVAL_S:
@@ -162,37 +162,32 @@ def reset() -> None:
         _state, _resolved_at = None, 0.0
 
 
-def _resolve_from_vendor() -> AccountState:
-    """Ask ChatGPT what this token's account is.
+def _default_resolver() -> AccountState:
+    """The resolver used until something installs a real one via `set_resolver`.
 
-    Synchronous and blocking on purpose: it runs at most once an hour, behind
-    `snapshot`'s lock, and making it async would push an event loop requirement
-    into every caller of a function that is meant to be trivially callable.
-
-    Kept separate from `snapshot` so the caching rules can be tested without a
-    network, and so the vendor call has exactly one home. Carries its own
-    timeout: this runs under `snapshot`'s lock, so a hung request here would
-    otherwise block every concurrent /health caller indefinitely.
+    Deliberately transport-free: capabilities.py knows the RULES (what a plan
+    means), never the TRANSPORT (how to reach ChatGPT). The real vendor call
+    lives in main.py, which already owns the HTTP client, the session pool and
+    the device id -- see `main._resolve_account_state`, installed at import
+    time with `capabilities.set_resolver(_resolve_account_state)`. Without that
+    registration (e.g. capabilities.py imported standalone, or in a test that
+    never wires main.py in) this stub still tells anonymous from account
+    correctly; it just cannot see plan, subscription or expiry.
     """
     if not auth.is_authenticated():
         return AccountState(mode="anonymous")
-    import httpx
-    r = httpx.get(
-        "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
-        params={"timezone_offset_min": "0"},
-        headers={"Authorization": "Bearer " + auth.access_token(),
-                 "User-Agent": "chatgpt-proxy/capabilities",
-                 "Accept": "application/json"},
-        timeout=15.0,
-    )
-    r.raise_for_status()
-    accounts = (r.json().get("accounts") or {})
-    account = accounts.get("default") or next(iter(accounts.values()), {}) or {}
-    entitlement = account.get("entitlement") or {}
-    inner = account.get("account") or {}
-    return AccountState(
-        mode="account",
-        plan=inner.get("plan_type"),
-        subscription_active=bool(entitlement.get("has_active_subscription")),
-        expires_at=entitlement.get("expires_at"),
-    )
+    return AccountState(mode="account")
+
+
+_resolver = _default_resolver
+
+
+def set_resolver(fn) -> None:
+    """Install the function `snapshot()` calls to reach the vendor.
+
+    `fn` takes no arguments and returns an `AccountState`. Called once at
+    import time by main.py; tests instead pass `snapshot(_resolve=...)`
+    directly, which bypasses this entirely.
+    """
+    global _resolver
+    _resolver = fn

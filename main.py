@@ -116,6 +116,49 @@ import capabilities
 import tool_calls as _tc
 
 # ---------------------------------------------------------------------------
+# capabilities.py wiring: the real vendor call
+# ---------------------------------------------------------------------------
+# capabilities.py knows the RULES (what a plan means), never the TRANSPORT (how
+# to reach ChatGPT) -- this module already owns the HTTP client, the device id
+# and the session pool, so the real accounts/check call lives here and gets
+# installed into capabilities.py, rather than the other way around.
+def _resolve_account_state() -> capabilities.AccountState:
+    """Reach accounts/check exactly the way GET /v1/account does, and turn the
+    response into an AccountState for capabilities.snapshot().
+
+    Synchronous and blocking on purpose: `capabilities.snapshot()` calls this
+    behind a `threading.Lock`, at most once an hour, and the /health handler
+    offloads the call to a worker thread (`asyncio.to_thread`) precisely so
+    this blocking round trip never stalls the event loop that in-flight chat
+    completions and streaming responses depend on.
+    """
+    if not auth.is_authenticated():
+        return capabilities.AccountState(mode="anonymous")
+
+    device_id = str(uuid.uuid4())
+    path = "/backend-api/accounts/check/v4-2023-04-27"
+    hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+    r = _httpx.get(f"{BASE}{path}", params={"timezone_offset_min": "0"},
+                   headers=hdrs, timeout=15.0)
+    r.raise_for_status()
+    data = r.json()
+
+    accts = data.get("accounts", {}) or {}
+    acc   = accts.get("default") or next(iter(accts.values()), {}) or {}
+    a     = acc.get("account", {}) or {}
+    ent   = acc.get("entitlement", {}) or {}
+    return capabilities.AccountState(
+        mode="account",
+        plan=a.get("plan_type"),
+        subscription_active=bool(ent.get("has_active_subscription")),
+        expires_at=ent.get("expires_at"),
+    )
+
+
+capabilities.set_resolver(_resolve_account_state)
+
+
+# ---------------------------------------------------------------------------
 # Per-user stores  {user_id: {file_id: {...}}}  /  {user_id: SessionPool}
 # ---------------------------------------------------------------------------
 _files: dict[str, dict[str, dict]] = {}
@@ -2055,7 +2098,12 @@ async def serve_image(filename: str):
 async def health():
     total_sessions = sum(len(p._pool) for p in _pools.values())
     total_files    = sum(len(uf) for uf in _files.values())
-    state = capabilities.snapshot()
+    # Offloaded to a worker thread: capabilities.snapshot() is synchronous and,
+    # on a cache miss, blocks on a vendor round trip (up to 15s) behind a
+    # threading.Lock. Awaiting it directly would stall THIS process's single
+    # asyncio event loop for that whole span -- freezing every in-flight chat
+    # completion and streaming response, not merely other /health callers.
+    state = await asyncio.to_thread(capabilities.snapshot)
     return {
         "status":  "ok",
         "version": "2.5.0",
