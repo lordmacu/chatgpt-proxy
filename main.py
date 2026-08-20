@@ -2081,8 +2081,8 @@ class ImageGenerationRequest(BaseModel):
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request):
     await require_capability("images")
-    # Fail fast when anonymous: image generation needs an account, and without
-    # this the message is spent before the 503.
+    # require_capability above is the real fail-fast gate now (401/501 before
+    # any message is spent); this check is redundant defense-in-depth below it.
     if not auth.is_authenticated():
         return JSONResponse(status_code=401, content={"error": {
             "message": "Image generation requires an authenticated account "
@@ -3040,6 +3040,23 @@ class Synthesized:
     message_id: str
 
 
+class _SynthesizeFailed(Exception):
+    """A synthesis that failed upstream, carried to whichever endpoint asked.
+
+    It exists so `_synthesize` has ONE way to signal failure to its two callers
+    while each of them still renders the error in this proxy's own shape --
+    `{"error": {...}}` at the top level, the same as every other endpoint here.
+    Raising HTTPException instead would be shorter, but FastAPI's default
+    handler nests the body under "detail", and a client that parses our errors
+    uniformly would break on exactly these two paths.
+    """
+
+    def __init__(self, status_code: int, payload: dict):
+        super().__init__(payload)
+        self.status_code = status_code
+        self.payload = payload
+
+
 async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesized:
     """The chat-echo + /backend-api/synthesize round trip.
 
@@ -3068,7 +3085,7 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
 
         cid, mid = session.conversation_id, session.parent_message_id
         if not cid or not mid:
-            raise HTTPException(502, detail={"error": {
+            raise _SynthesizeFailed(502, {"error": {
                 "message": "could not obtain the message to synthesize", "type": "upstream_error"}})
 
         path = "/backend-api/synthesize"
@@ -3086,7 +3103,7 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
             detail = j.get("detail", j) if isinstance(j, dict) else j
         except Exception:
             detail = r.text[:200]
-        raise HTTPException(r.status_code, detail={"error": {
+        raise _SynthesizeFailed(r.status_code, {"error": {
             "type": "synthesize_error", "detail": detail}})
 
     media = r.headers.get("content-type", "audio/mpeg")
@@ -3112,7 +3129,10 @@ async def audio_speech(req: SpeechRequest, request: Request):
     if not text:
         return JSONResponse(status_code=400, content={"error": {
             "message": "'input' is required", "type": "invalid_request_error"}})
-    s = await _synthesize(text, req.voice, req.format, req.model)
+    try:
+        s = await _synthesize(text, req.voice, req.format, req.model)
+    except _SynthesizeFailed as e:
+        return JSONResponse(status_code=e.status_code, content=e.payload)
     stored = _store_audio(s.audio, s.message_id[:36], s.voice, s.format, s.media_type)
     return Response(content=s.audio, media_type=s.media_type, headers={
         "X-Audio-Url":       stored["url"],
@@ -3134,7 +3154,10 @@ async def chatgpt_audio_speech(req: SpeechRequest, request: Request):
     if not text:
         return JSONResponse(status_code=400, content={"error": {
             "message": "'input' is required", "type": "invalid_request_error"}})
-    s = await _synthesize(text, req.voice, req.format, req.model)
+    try:
+        s = await _synthesize(text, req.voice, req.format, req.model)
+    except _SynthesizeFailed as e:
+        return JSONResponse(status_code=e.status_code, content=e.payload)
     stored = _store_audio(s.audio, s.message_id[:36], s.voice, s.format, s.media_type)
     return {**stored, "text": s.text, "exact_match": s.exact_match,
             "voice": s.voice, "format": s.format,

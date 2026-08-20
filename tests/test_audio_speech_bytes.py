@@ -52,3 +52,43 @@ def test_the_native_endpoint_still_returns_the_json_form(synthesized):
     assert body["text"] == "hola"
     assert body["exact_match"] is True
     assert body["url"].endswith(".mp3")
+
+
+@pytest.fixture
+def synthesize_upstream_failure(monkeypatch):
+    """`_synthesize` failing upstream, the way an unreachable/erroring backend
+    would surface it -- as a `_SynthesizeFailed`, not an `HTTPException`.
+
+    Guards against the shape regression a plain `raise HTTPException(...)`
+    inside `_synthesize` would reintroduce: FastAPI's default handler nests
+    `detail` under a top-level "detail" key, which every OTHER error path in
+    this proxy (including the "input is required" check two lines above each
+    call site) does not do. Both thin handlers must still answer with a bare
+    `{"error": {...}}` at the top level.
+    """
+    cap.reset()
+    monkeypatch.setattr(cap, "snapshot",
+                        lambda **kw: cap.AccountState(mode="account", plan="go"))
+
+    async def fake_synthesize(text, voice, fmt, model):
+        raise main._SynthesizeFailed(502, {"error": {
+            "type": "upstream_error",
+            "message": "could not obtain the message to synthesize"}})
+
+    monkeypatch.setattr(main, "_synthesize", fake_synthesize)
+
+
+def test_audio_speech_reports_an_upstream_failure_in_the_proxys_own_error_shape(
+        synthesize_upstream_failure):
+    with TestClient(main.app) as c:
+        r = c.post("/v1/audio/speech", json={"input": "hola"})
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "upstream_error"
+
+
+def test_the_native_endpoint_also_reports_an_upstream_failure_in_the_proxys_own_error_shape(
+        synthesize_upstream_failure):
+    with TestClient(main.app) as c:
+        r = c.post("/chatgpt/audio/speech", json={"input": "hola"})
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "upstream_error"
