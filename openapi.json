@@ -1298,6 +1298,100 @@
           }
         }
       }
+    },
+    "/v1/audio/speech": {
+      "post": {
+        "summary": "TTS Free Text",
+        "operationId": "audio_speech",
+        "tags": [
+          "Audio"
+        ],
+        "description": "Texto libre → mp3. Como synthesize solo lee respuestas del asistente, internamente hace que el modelo repita el texto verbatim (reintenta 1 vez), verifica, y lo sintetiza. Gasta un mensaje de chat por llamada. Devuelve url + text + exact_match. Voces: juniper, cove, ember, breeze, maple, vale, glimmer, orbit, fathom, ridge.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "input"
+                ],
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "example": "Hola, esto se convierte a voz."
+                  },
+                  "voice": {
+                    "type": "string",
+                    "default": "juniper"
+                  },
+                  "format": {
+                    "type": "string",
+                    "default": "mp3",
+                    "enum": [
+                      "mp3",
+                      "aac"
+                    ]
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": "auto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "URL del audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "texto realmente sintetizado"
+                    },
+                    "exact_match": {
+                      "type": "boolean",
+                      "description": "false si el modelo alteró el texto"
+                    },
+                    "voice": {
+                      "type": "string"
+                    },
+                    "format": {
+                      "type": "string"
+                    },
+                    "content_type": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "conversation_id": {
+                      "type": "string"
+                    },
+                    "message_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "input requerido"
+          },
+          "404": {
+            "description": "voz no encontrada"
+          }
+        }
+      }
     }
   },
   "components": {

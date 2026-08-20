@@ -842,6 +842,42 @@
             }
           ],
           "response": []
+        },
+        {
+          "name": "TTS Free Text",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/audio/speech",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"input\": \"Hola, esto se convierte a voz.\", \"voice\": \"juniper\", \"format\": \"mp3\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Texto libre → mp3. Devuelve {url,text,exact_match,...}. Gasta un mensaje de chat."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('Has url', function(){ pm.expect(pm.response.json()).to.have.property('url'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ]
     }
