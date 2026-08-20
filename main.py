@@ -45,7 +45,7 @@ import pathlib
 from typing import Optional, AsyncGenerator, Union, List
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
@@ -1753,3 +1753,96 @@ async def conversation_detail(conversation_id: str, request: Request):
         "gizmo_id":    d.get("gizmo_id"),
         "messages":    messages,
     }
+
+
+# Audio (TTS) storage, mirroring the image flow: save the file and serve it via a
+# URL rather than streaming raw bytes. Reuses IMAGE_BASE_URL as the proxy's public
+# base unless AUDIO_BASE_URL is set.
+_AUDIO_STORE_DIR = pathlib.Path(os.environ.get("AUDIO_STORE_DIR", "/tmp/chatgpt_audio"))
+_AUDIO_BASE_URL  = (os.environ.get("AUDIO_BASE_URL")
+                    or os.environ.get("IMAGE_BASE_URL", "")).rstrip("/")
+_AUDIO_EXT = {"mp3": ".mp3", "aac": ".aac", "opus": ".opus", "wav": ".wav", "ogg": ".ogg"}
+
+
+@app.get("/v1/audio/from-message")
+async def audio_from_message(
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    voice: str = "juniper",
+    format: str = "mp3",
+    raw: bool = False,
+):
+    """Text-to-speech of an EXISTING conversation message (ChatGPT `synthesize`).
+
+    The backend only reads back a stored message, so this needs a
+    `conversation_id` + `message_id` (get them from /v1/conversations/{id}) --
+    it is NOT free-text TTS (`synthesize` rejects arbitrary text). Returns the
+    raw audio bytes with the upstream content-type. `voice` defaults to juniper;
+    `format` to mp3 (also aac). Works authenticated and anonymous, but the
+    conversation must belong to the caller's identity.
+    """
+    prefix = "/backend-api" if auth.is_authenticated() else "/backend-anon"
+    path   = prefix + "/synthesize"
+
+    user_id  = _get_user_id(request)
+    pool     = _user_pool(user_id)
+    sessions = list(pool._pool.values())
+    if sessions:
+        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+    else:
+        device_id, owns_client = str(uuid.uuid4()), True
+        client = _httpx.AsyncClient(verify=True, timeout=45.0, follow_redirects=True)
+
+    try:
+        hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
+        r = await client.get(f"{BASE}{path}", headers=hdrs, params={
+            "conversation_id": conversation_id,
+            "message_id":      message_id,
+            "voice":           voice,
+            "format":          format,
+        })
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    if r.status_code != 200:
+        # Bubble up the backend's own error (404 no-access, 422 bad params, ...).
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {"message": r.text[:200]}
+        return JSONResponse(status_code=r.status_code,
+                            content={"error": {"type": "synthesize_error", "detail": detail}})
+
+    media = r.headers.get("content-type", "audio/mpeg")
+    if raw:
+        # Opt-out: stream the bytes directly instead of storing + serving a URL.
+        return Response(content=r.content, media_type=media)
+
+    # Default: save the file and hand back a URL, exactly like generated images.
+    _AUDIO_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    ext      = _AUDIO_EXT.get(format.lower(), ".mp3")
+    filename = f"{message_id[:36]}-{voice}{ext}"
+    (_AUDIO_STORE_DIR / filename).write_bytes(r.content)
+    served = (f"{_AUDIO_BASE_URL}/audio/{filename}" if _AUDIO_BASE_URL
+              else f"/audio/{filename}")
+    return {
+        "url":             served,
+        "conversation_id": conversation_id,
+        "message_id":      message_id,
+        "voice":           voice,
+        "format":          format,
+        "content_type":    media,
+        "bytes":           len(r.content),
+    }
+
+
+@app.get("/audio/{filename}", include_in_schema=False)
+async def serve_audio(filename: str):
+    """Serve a locally stored TTS file from _AUDIO_STORE_DIR."""
+    safe = pathlib.Path(filename).name  # strip any path traversal
+    path = _AUDIO_STORE_DIR / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="audio not found")
+    return FileResponse(str(path))
