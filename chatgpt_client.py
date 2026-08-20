@@ -175,6 +175,12 @@ class ChatGPTSession:
         self._ready:     bool  = False
         self.quota_exhausted: bool = False  # True when this device_id hit its limit
 
+        # Sentinel chat-requirements token: the backend hands one out (valid a few
+        # minutes) and wants it echoed on every conversation request. Captured in
+        # _chat_requirements(), refreshed before expiry in _ensure_chat_requirements().
+        self._chat_req_token:  Optional[str] = None
+        self._chat_req_expire: float = 0.0
+
         # Metadata from the last turn — reset at the start of each stream_message
         self.last_search_queries: list = []
         self.last_citations:      list = []   # [{url, title, attribution}]
@@ -207,6 +213,15 @@ class ChatGPTSession:
         return r.json().get("models", [])
 
     async def _chat_requirements(self) -> None:
+        """Fetch the sentinel token the backend wants echoed on each conversation
+        request (header `openai-sentinel-chat-requirements-token`).
+
+        For this account (and the anon endpoint) the response is just
+        `{token, expire_after, expire_at}` -- no proofofwork/turnstile/arkose --
+        so capturing the token is enough; there is no proof to compute. If OpenAI
+        ever starts returning `proofofwork.required` for this path, the token
+        alone would stop being accepted and a PoW step would be needed here.
+        """
         hdrs = {
             **_base_headers(self.device_id),
             "X-OpenAI-Target-Path": _api("/sentinel/chat-requirements"),
@@ -218,6 +233,19 @@ class ChatGPTSession:
             content=b"{}",
         )
         r.raise_for_status()
+        data = r.json()
+        self._chat_req_token = data.get("token")
+        # Refresh 30s before the server's expiry so a long turn never rides a dead
+        # token; expire_after is in seconds (observed 540 = 9 min).
+        ttl = data.get("expire_after") or 300
+        self._chat_req_expire = time.time() + max(30, ttl - 30)
+        _log(f"chat-requirements token obtained (ttl={ttl}s, "
+             f"{'present' if self._chat_req_token else 'MISSING'})")
+
+    async def _ensure_chat_requirements(self) -> None:
+        """Make sure we hold a live chat-requirements token, refetching on expiry."""
+        if not self._chat_req_token or time.time() >= self._chat_req_expire:
+            await self._chat_requirements()
 
     @classmethod
     def _resolve_model(cls, requested: str) -> str:
@@ -243,6 +271,7 @@ class ChatGPTSession:
         json_mode:         True=instruct the model to respond with valid JSON only
         """
         await self.ensure_ready()
+        await self._ensure_chat_requirements()
         self.last_used        = time.time()
         self.last_search_queries = []
         self.last_citations      = []
@@ -329,6 +358,8 @@ class ChatGPTSession:
             "Connection":           "keep-alive",
             "X-Sentinel-Payload":   SENTINEL_PAYLOAD,
             "oai-session-id":       session_id,
+            **({"openai-sentinel-chat-requirements-token": self._chat_req_token}
+               if self._chat_req_token else {}),
             "x-oai-convo-session-id": session_id,
             "x-oai-turn-trace-id":  str(uuid.uuid4()),
             "OAI-Echo-Logs":        "1,0,0,0",
