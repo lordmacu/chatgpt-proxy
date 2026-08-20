@@ -28,7 +28,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from chatgpt_client import ChatGPTSession, QuotaExceededError, _extract_json
+from chatgpt_client import (
+    ChatGPTSession, QuotaExceededError, _extract_json,
+    THINKING_EFFORTS, SERVICE_TIERS,
+)
 
 # ── Color support ─────────────────────────────────────────────────────────────
 
@@ -170,6 +173,8 @@ async def ask(
     search:      Optional[bool] = None,
     tools:       Optional[bool] = None,
     canvas:      Optional[bool] = None,
+    effort:      Optional[str]  = None,
+    tier:        Optional[str]  = None,
     quiet:       bool = False,
 ) -> str:
     """
@@ -190,6 +195,8 @@ async def ask(
             force_use_tools   = tools,
             force_use_canvas  = canvas,
             json_mode         = json_mode,
+            thinking_effort   = effort,
+            service_tier      = tier,
         ):
             if first:
                 spinner.stop()
@@ -243,6 +250,7 @@ CHAT_HELP = """\
   /model <name>      Switch model  (e.g. /model gpt-5-5)
   /search on|off     Force web search on or off
   /tools on|off      Enable/disable advanced tools
+  /effort <level>    Thinking effort: standard | extended | max  (or 'default')
   /json on|off       Toggle JSON output mode
   /system <text>     Set a new system prompt
   /info              Show current settings
@@ -260,6 +268,8 @@ async def chat(
     search:     Optional[bool] = None,
     tools:      Optional[bool] = None,
     canvas:     Optional[bool] = None,
+    effort:     Optional[str]  = None,
+    tier:       Optional[str]  = None,
     json_mode:  bool           = False,
     file_paths: list           = (),
     stream:     bool           = True,
@@ -277,6 +287,7 @@ async def chat(
     cur_model  = model
     cur_search = search
     cur_tools  = tools
+    cur_effort = effort
     cur_json   = json_mode
 
     # Load files specified at startup
@@ -370,6 +381,23 @@ async def chat(
                 if not quiet:
                     print(f"{c.GREY}Advanced tools → {label}{c.RESET}\n", file=sys.stderr)
 
+            elif cmd == "/effort":
+                if not arg:
+                    print(f"{c.GREY}Thinking effort: {cur_effort or 'default'}{c.RESET}",
+                          file=sys.stderr)
+                elif arg.lower() in ("off", "auto", "default", "none"):
+                    cur_effort = None
+                    if not quiet:
+                        print(f"{c.GREY}Thinking effort → default{c.RESET}\n", file=sys.stderr)
+                elif arg.lower() in THINKING_EFFORTS:
+                    cur_effort = arg.lower()
+                    if not quiet:
+                        print(f"{c.GREY}Thinking effort → {cur_effort}{c.RESET}\n", file=sys.stderr)
+                else:
+                    print(f"{c.YELLOW}Effort must be one of "
+                          f"{', '.join(THINKING_EFFORTS)} (or 'default'){c.RESET}",
+                          file=sys.stderr)
+
             elif cmd == "/json":
                 if arg.lower() in ("on", "true", "1"):
                     cur_json = True
@@ -397,7 +425,8 @@ async def chat(
                 print(
                     f"{c.GREY}"
                     f"model={cur_model}  search={search_label}  "
-                    f"tools={tools_label}  json={cur_json}  "
+                    f"tools={tools_label}  effort={cur_effort or 'default'}  "
+                    f"json={cur_json}  "
                     f"system={sys_str}"
                     f"{c.RESET}\n",
                     file=sys.stderr,
@@ -423,6 +452,8 @@ async def chat(
                 search     = cur_search,
                 tools      = cur_tools,
                 canvas     = canvas,
+                effort     = cur_effort,
+                tier       = tier,
                 quiet      = quiet,
             )
             file_texts = []  # attachments are one-shot
@@ -515,6 +546,20 @@ examples:
         help="Enable Canvas / collaborative document mode.",
     )
     feat_group.add_argument(
+        "--effort",
+        choices=list(THINKING_EFFORTS),
+        default=None,
+        help="Thinking effort for reasoning models. Anonymous models report "
+             "configurable_thinking_effort=false, so this is carried through but "
+             "may not change the answer.",
+    )
+    feat_group.add_argument(
+        "--tier",
+        choices=list(SERVICE_TIERS),
+        default=None,
+        help="Upstream service tier.",
+    )
+    feat_group.add_argument(
         "--json", "-j",
         action="store_true",
         help="Force JSON output mode (response_format: json_object).",
@@ -568,6 +613,8 @@ examples:
             search     = search,
             tools      = True if args.tools else None,
             canvas     = True if args.canvas else None,
+            effort     = args.effort,
+            tier       = args.tier,
             json_mode  = args.json,
             file_paths = args.files,
             stream     = stream,
@@ -586,6 +633,8 @@ examples:
             search     = search,
             tools      = True if args.tools else None,
             canvas     = True if args.canvas else None,
+            effort     = args.effort,
+            tier       = args.tier,
             quiet      = args.quiet,
         )
 

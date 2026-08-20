@@ -69,7 +69,11 @@ import os
 import uuid
 import json
 import time
+import base64
+import asyncio
 import pathlib
+import ipaddress
+from urllib.parse import urlparse
 from typing import Optional, AsyncGenerator, Union, List
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
@@ -995,16 +999,20 @@ def _msg_to_text(m: "Message") -> str:
 def _resolve_messages(
     messages: List[Message],
     user_files: dict[str, dict],
-) -> tuple[str, str, List[str]]:
+) -> tuple[str, str, List[str], List[dict]]:
     """
     Extract:
       - system_prompt: content of the system role message
       - last_user_text: text of the last user message, with prior history
         injected as context (for multi-turn without server-side state)
       - file_texts: contents of file attachments in the last message
+      - image_parts: OpenAI image_url parts on the last user message (vision
+        input); each is the raw {"url": ..., "detail"?: ...} dict, uploaded and
+        attached later by the caller. Requires an authenticated account.
     """
     system_prompt = ""
     file_texts: List[str] = []
+    image_parts: List[dict] = []
 
     for m in messages:
         if m.role == "system":
@@ -1033,11 +1041,9 @@ def _resolve_messages(
                 elif fdata.get("content"):
                     file_texts.append(fdata["content"])
             elif part.type == "image_url":
-                raise HTTPException(
-                    400,
-                    "image_url is not available in anonymous mode. "
-                    "Use text files (type='file') instead."
-                )
+                iu = part.image_url or {}
+                if iu.get("url"):
+                    image_parts.append(iu)
 
     # Inject prior history (user + assistant) as context in the message
     prior_turns = []
@@ -1059,10 +1065,98 @@ def _resolve_messages(
             f"{last_user_text}"
         )
 
-    if not last_user_text:
+    if not last_user_text and not image_parts:
         raise HTTPException(400, "Last user message is empty")
 
-    return system_prompt, last_user_text, file_texts
+    return system_prompt, last_user_text, file_texts, image_parts
+
+
+# --- Vision input (image_url parts) ----------------------------------------
+
+_VISION_MAX_IMAGES = 10
+_VISION_MAX_BYTES  = 20 * 1024 * 1024   # 20 MB per image
+_VISION_EXT = {"image/png": ".png", "image/jpeg": ".jpg",
+               "image/webp": ".webp", "image/gif": ".gif"}
+
+
+def _decode_data_url(url: str) -> tuple[bytes, str]:
+    """Parse a base64 `data:` URL → (bytes, mime)."""
+    try:
+        head, b64 = url.split(",", 1)
+    except ValueError:
+        raise HTTPException(400, "malformed data: URL")
+    if "base64" not in head:
+        raise HTTPException(400, "only base64 data: URLs are supported")
+    mime = "image/png"
+    meta = head[len("data:"):]
+    if meta:
+        mime = meta.split(";", 1)[0] or mime
+    try:
+        data = base64.b64decode(b64, validate=False)
+    except Exception:
+        raise HTTPException(400, "invalid base64 in data: URL")
+    if not data:
+        raise HTTPException(400, "empty image data")
+    return data, (mime or "image/png")
+
+
+async def _fetch_remote_image(url: str) -> tuple[bytes, str]:
+    """Download a remote image → (bytes, mime), with an SSRF guard.
+
+    This proxy can reach internal services (e.g. the Coolify API on localhost),
+    so remote fetches must resolve to a public address and redirects are not
+    followed (a 3xx could bounce to an internal target)."""
+    host = (urlparse(url).hostname or "").strip("[]")
+    if not host:
+        raise HTTPException(400, "image URL has no host")
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    except Exception:
+        raise HTTPException(400, "could not resolve image URL host")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise HTTPException(400, "image URL host is not allowed")
+    try:
+        async with _httpx.AsyncClient(follow_redirects=False, timeout=30.0) as c:
+            r = await c.get(url, headers={"User-Agent": "chatgpt-proxy/vision"})
+    except Exception as e:
+        raise HTTPException(400, f"could not fetch image URL: {e}")
+    if r.status_code != 200:
+        raise HTTPException(400, f"image URL returned HTTP {r.status_code}")
+    mime = (r.headers.get("content-type") or "").split(";")[0].strip()
+    if not mime.startswith("image/"):
+        mime = "image/png"   # some CDNs mislabel; the backend sniffs the bytes
+    return r.content, mime
+
+
+async def _prepare_images(session, image_parts: List[dict]) -> List[dict]:
+    """Load each OpenAI image_url part (data: or http(s) URL) and upload it to
+    the backend for vision input. Returns the pointer dicts stream_message()
+    consumes. Raises HTTPException on bad/oversized input."""
+    if len(image_parts) > _VISION_MAX_IMAGES:
+        raise HTTPException(400, f"too many images (max {_VISION_MAX_IMAGES})")
+    out: List[dict] = []
+    for idx, part in enumerate(image_parts):
+        url = (part.get("url") or "").strip()
+        if not url:
+            continue
+        if url.startswith("data:"):
+            data, mime = _decode_data_url(url)
+        elif url.startswith("http://") or url.startswith("https://"):
+            data, mime = await _fetch_remote_image(url)
+        else:
+            raise HTTPException(400, "image_url.url must be a data: or http(s) URL")
+        if len(data) > _VISION_MAX_BYTES:
+            raise HTTPException(400, f"image too large (max {_VISION_MAX_BYTES // (1024 * 1024)} MB)")
+        ext = _VISION_EXT.get(mime, ".png")
+        try:
+            meta = await session.upload_image(data, f"image_{idx + 1}{ext}", mime)
+        except Exception as e:
+            raise HTTPException(502, f"image upload failed: {e}")
+        out.append(meta)
+    return out
 
 # ---------------------------------------------------------------------------
 # /v1/models
@@ -1401,10 +1495,19 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         return await _image_via_chat_completions(req, pool, msgs_raw, completion_id)
     json_mode = req.is_json_mode()
 
-    system_prompt, last_user_text, file_texts = _resolve_messages(req.messages, uf)
+    system_prompt, last_user_text, file_texts, image_parts = _resolve_messages(req.messages, uf)
+
+    # Vision input needs a real account (the anonymous backend has no file
+    # upload). Fail fast before spending a message or uploading anything.
+    if image_parts and not auth.is_authenticated():
+        return _needs_account()
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     _key, session = await pool.get(msgs_raw, system_prompt=system_prompt, gizmo_id=gizmo_id)
+
+    # Upload any images once, up front. The file ids are account-scoped, so they
+    # stay valid even if a quota retry swaps in a fresh device session below.
+    uploaded_images = await _prepare_images(session, image_parts) if image_parts else None
 
     force_use_search, force_use_tools, force_use_canvas = req.resolved_backend_flags()
     # Both raise a 400 before the upstream request is made, so an unsupported
@@ -1444,6 +1547,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                         thinking_effort   = thinking_effort,
                         service_tier      = service_tier,
                         force_disable_features = req.force_disable_features,
+                        images            = uploaded_images,
                     ):
                         if text_chunk:
                             yield _make_chunk(text_chunk, req.model, completion_id).encode()
@@ -1521,6 +1625,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     thinking_effort   = thinking_effort,
                     service_tier      = service_tier,
                     force_disable_features = req.force_disable_features,
+                    images            = uploaded_images,
                 ):
                     full_text += chunk
                 break  # success

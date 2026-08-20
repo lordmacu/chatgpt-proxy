@@ -3,7 +3,7 @@ ChatGPT Android anonymous client — async, FastAPI compatible.
 """
 import re
 import pathlib
-import uuid, json, hashlib, time, sys, os
+import uuid, json, hashlib, time, sys, os, struct
 from typing import AsyncGenerator, Optional
 import httpx
 
@@ -105,6 +105,17 @@ def _log(*args):
 BASE        = "https://android.chat.openai.com"
 APP_VERSION = "1.2026.223"
 
+# The two knobs the conversation endpoint actually exposes over generation.
+# There is no temperature / top_p / max_tokens anywhere in the protocol: the
+# Android client's request DTO carries 47 fields and none of them is a sampling
+# parameter, and the backend silently drops any it does not know. These two are
+# different -- they are validated upstream, so an unknown value comes back as
+# HTTP 422 ("Invalid conversation body" for thinking_effort, "Unsupported
+# service tier" for service_tier). Reject them here instead of burning a
+# request and, on anonymous sessions, a slice of the message quota.
+THINKING_EFFORTS: tuple[str, ...] = ("standard", "extended", "max")
+SERVICE_TIERS:    tuple[str, ...] = ("standard", "priority")
+
 SENTINEL_PAYLOAD = json.dumps({
     "bot_token": {
         "failure_reason": (
@@ -145,6 +156,56 @@ def _base_headers(device_id: str) -> dict:
     if token:
         headers["Authorization"] = "Bearer " + token
     return headers
+
+
+def _image_dimensions(data: bytes) -> tuple[int, int]:
+    """Best-effort (width, height) for PNG/JPEG/GIF/WEBP/BMP with no external
+    deps. The backend reads the real image off the blob, so these values are
+    only metadata for the image_asset_pointer part -- when the format isn't
+    recognised we fall back to a square guess rather than fail the upload."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":                       # PNG
+            w, h = struct.unpack(">II", data[16:24])
+            return int(w), int(h)
+        if data[:6] in (b"GIF87a", b"GIF89a"):                    # GIF
+            w, h = struct.unpack("<HH", data[6:10])
+            return int(w), int(h)
+        if data[:2] == b"BM":                                     # BMP
+            w, h = struct.unpack("<ii", data[18:26])
+            return int(abs(w)), int(abs(h))
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":         # WEBP
+            fmt = data[12:16]
+            if fmt == b"VP8X":
+                w = 1 + int.from_bytes(data[24:27], "little")
+                h = 1 + int.from_bytes(data[27:30], "little")
+                return w, h
+            if fmt == b"VP8 ":
+                w = int.from_bytes(data[26:28], "little") & 0x3FFF
+                h = int.from_bytes(data[28:30], "little") & 0x3FFF
+                return w, h
+            if fmt == b"VP8L":
+                b0, b1, b2, b3 = data[21], data[22], data[23], data[24]
+                w = 1 + (((b1 & 0x3F) << 8) | b0)
+                h = 1 + (((b3 & 0x0F) << 10) | (b2 << 2) | ((b1 & 0xC0) >> 6))
+                return w, h
+        if data[:2] == b"\xff\xd8":                               # JPEG
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h = int.from_bytes(data[i + 5:i + 7], "big")
+                    w = int.from_bytes(data[i + 7:i + 9], "big")
+                    return w, h
+                seg = int.from_bytes(data[i + 2:i + 4], "big")
+                if seg <= 0:
+                    break
+                i += 2 + seg
+    except Exception:
+        pass
+    return 1024, 1024
 
 
 class ChatGPTSession:
@@ -272,6 +333,80 @@ class ChatGPTSession:
             return "auto"
         return cls._MODEL_MAP.get(requested, requested)
 
+    async def upload_image(self, data: bytes, filename: str, mime: str) -> dict:
+        """Upload one image for VISION input and return its pointer metadata.
+
+        Reversed from the Android app: create the file record, then PUT the raw
+        bytes to the Azure signed URL it hands back. There is no separate
+        "uploaded"/confirm call -- the file is usable once the blob PUT returns.
+
+            POST /backend-api/files
+                {file_name, file_size, use_case:"multimodal", store_in_library:false}
+              -> {status:"success", upload_url:<azure signed>, file_id:"file-..."}
+            PUT <upload_url>  (x-ms-blob-type: BlockBlob)  <raw bytes>
+
+        Requires an authenticated account -- the anonymous backend exposes no
+        file upload. Returns the dict stream_message() expects in `images`.
+        """
+        await self.ensure_ready()
+        size = len(data)
+        create_body = {
+            "file_name":        filename,
+            "file_size":        size,
+            "use_case":         "multimodal",
+            "store_in_library": False,
+        }
+        if self.gizmo_id:
+            create_body["gizmo_id"] = self.gizmo_id
+
+        r = await self.client.post(
+            f"{BASE}/backend-api/files",
+            headers={**_base_headers(self.device_id), "Content-Type": "application/json"},
+            json=create_body, timeout=30.0,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"file create failed: HTTP {r.status_code} {r.text[:160]}")
+        d = r.json()
+        if d.get("status") != "success" or not d.get("upload_url") or not d.get("file_id"):
+            raise RuntimeError(f"file create bad response: {str(d)[:160]}")
+        file_id, upload_url = d["file_id"], d["upload_url"]
+
+        # PUT the bytes to the Azure blob. This is a pre-signed URL, so it must
+        # NOT carry the OAI/Bearer headers -- only the blob-service ones.
+        put = await self.client.put(
+            upload_url,
+            headers={"x-ms-blob-type": "BlockBlob",
+                     "x-ms-version":  "2020-04-08",
+                     "Content-Type":  mime or "application/octet-stream"},
+            content=data, timeout=120.0,
+        )
+        if put.status_code not in (200, 201):
+            raise RuntimeError(f"blob upload failed: HTTP {put.status_code} {put.text[:160]}")
+
+        # Finalize: tell the backend the blob is in place. Without this the file
+        # stays "not ready" forever and referencing it in a conversation 500s.
+        # (This POST /files/{id}/uploaded step is not obvious in the decompiled
+        # app -- found by probing the live backend.)
+        fin = await self.client.post(
+            f"{BASE}/backend-api/files/{file_id}/uploaded",
+            headers={**_base_headers(self.device_id), "Content-Type": "application/json"},
+            json={}, timeout=30.0,
+        )
+        if fin.status_code != 200:
+            raise RuntimeError(f"file finalize failed: HTTP {fin.status_code} {fin.text[:160]}")
+
+        w, h = _image_dimensions(data)
+        _log(f"[vision] uploaded {file_id} ({size} B, {w}x{h}, {mime})")
+        return {
+            "file_id":       file_id,
+            "asset_pointer": f"file-service://{file_id}",
+            "size_bytes":    size,
+            "width":         w,
+            "height":        h,
+            "name":          filename,
+            "mime":          mime,
+        }
+
     async def stream_message(
         self,
         message: str,
@@ -281,6 +416,11 @@ class ChatGPTSession:
         force_use_tools:  Optional[bool] = None,
         force_use_canvas: Optional[bool] = None,
         json_mode: bool = False,
+        thinking_effort:        Optional[str] = None,
+        service_tier:           Optional[str] = None,
+        force_disable_features: Optional[list[str]] = None,
+        is_reasoning_skipped:   Optional[bool] = None,
+        images:                 Optional[list[dict]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Send a message and yield each new text fragment as a plain string.
@@ -289,7 +429,30 @@ class ChatGPTSession:
         force_use_tools:   True=enable advanced tools (reservations, shopping, widgets)
         force_use_canvas:  True=enable Canvas mode (documents)
         json_mode:         True=instruct the model to respond with valid JSON only
+
+        thinking_effort:   one of THINKING_EFFORTS -- how long a reasoning model
+                           deliberates. The backend echoes the value back in the
+                           assistant message metadata, so it is carried through,
+                           but the anonymous model list reports
+                           configurable_thinking_effort=false and an empty
+                           thinking_efforts list, so on those models expect it to
+                           be accepted without changing the answer.
+        service_tier:      one of SERVICE_TIERS -- upstream scheduling class.
+        force_disable_features:  feature names to switch off for this turn (not
+                           validated upstream; unknown names are ignored).
+        is_reasoning_skipped:    skip the reasoning pass. Only meaningful once the
+                           session has a real conversation tree -- sending True on
+                           a first turn makes the backend answer 404 node_not_found.
         """
+        if thinking_effort is not None and thinking_effort not in THINKING_EFFORTS:
+            raise ValueError(
+                f"thinking_effort must be one of {THINKING_EFFORTS}, got {thinking_effort!r}"
+            )
+        if service_tier is not None and service_tier not in SERVICE_TIERS:
+            raise ValueError(
+                f"service_tier must be one of {SERVICE_TIERS}, got {service_tier!r}"
+            )
+
         await self.ensure_ready()
         await self._ensure_chat_requirements()
         self.last_used        = time.time()
@@ -320,6 +483,33 @@ class ChatGPTSession:
         msg_parts.append(message)
         final_message = "\n\n".join(msg_parts)
 
+        # Vision input: when images were uploaded, the user message becomes a
+        # multimodal_text part list (image_asset_pointer parts + the text) and
+        # the uploaded files are echoed in metadata.attachments -- exactly what
+        # the Android app sends. Otherwise it stays a plain text message.
+        if images:
+            content_obj = {
+                "content_type": "multimodal_text",
+                "parts": [
+                    {
+                        "content_type":  "image_asset_pointer",
+                        "asset_pointer": im["asset_pointer"],
+                        "size_bytes":    im["size_bytes"],
+                        "width":         im["width"],
+                        "height":        im["height"],
+                    }
+                    for im in images
+                ] + [final_message],
+            }
+            attachments = [
+                {"id": im["file_id"], "name": im["name"],
+                 "size": im["size_bytes"], "mime_type": im["mime"]}
+                for im in images
+            ]
+        else:
+            content_obj = {"parts": [final_message], "content_type": "text"}
+            attachments = []
+
         msg_id     = str(uuid.uuid4())
         session_id = str(uuid.uuid4())
         parent_id  = self.parent_message_id or str(uuid.uuid4())
@@ -330,7 +520,7 @@ class ChatGPTSession:
             "messages": [{
                 "id":     msg_id,
                 "author": {"role": "user"},
-                "content": {"parts": [final_message], "content_type": "text"},
+                "content": content_obj,
                 "status":    "finished_successfully",
                 "recipient": "all",
                 "metadata": {
@@ -342,7 +532,8 @@ class ChatGPTSession:
                     "real_time_audio_has_video": False, "system_hints": [],
                     "dictation": False, "voice_mode_message": False,
                     "image_gen_async": False, "trigger_async_ux": False,
-                    "writing_blocks": {}
+                    "writing_blocks": {},
+                    **({"attachments": attachments} if attachments else {}),
                 }
             }],
             "model":                         real_model,
@@ -367,6 +558,22 @@ class ChatGPTSession:
             "client_prepare_state": "none",
             "stream":               True,
         }
+        # Fields the Android client only puts on the wire when it has something to
+        # say. Omitting them keeps the body shaped like the real client's; sending
+        # an unsupported *value* is what earns a 422, which the guard above catches.
+        if thinking_effort:
+            body["thinking_effort"] = thinking_effort
+        if service_tier:
+            body["service_tier"] = service_tier
+        if force_disable_features:
+            body["force_disable_features"] = list(force_disable_features)
+        if is_reasoning_skipped is not None:
+            body["is_reasoning_skipped"] = is_reasoning_skipped
+
+        # response_format is *not* part of the conversation DTO -- it survives only
+        # because the backend ignores unknown keys. json_mode really works through
+        # the instruction prepended to the prompt above; this stays as a hint in
+        # case the field is ever honoured.
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         if self.gizmo_id:

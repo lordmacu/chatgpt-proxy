@@ -23,11 +23,19 @@ Qué se puede hacer con el proxy según el tipo de cuenta detrás del token:
 | TTS (`POST /v1/audio/speech`, `GET /v1/audio/from-message`) | ❌ | ✅ | ✅ |
 | STT (`POST /v1/audio/transcriptions`) | ❌ | ✅ | ✅ |
 | **Imágenes** (`POST /v1/images/generations`) | ❌ | **❌ bloqueado** | ✅ |
-| **Endpoints accesibles** | **5/14** | **15/16** | **16/16** |
+| **Visión** (imagen como input en el chat, `image_url`) | ❌ | ✅ ² | ✅ |
+| **Endpoints accesibles** | **5/15** | **16/17** | **17/17** |
 
 `❌` en anónima = 401 "needs an authenticated account" (el endpoint requiere
 cuenta; `synthesize`, `library`, `gizmos`, etc. no tienen variante
 `/backend-anon`). Chat, translate, models, session/me y limits sí andan anónimos.
+
+² **Visión** (mandar una imagen para que el modelo la analice) es distinto de
+**generar** imágenes: la visión **no** está bloqueada en free (la generación sí).
+Sube la imagen al file store de la cuenta (`POST /files` → PUT al blob →
+`POST /files/{id}/uploaded`) y la adjunta al turno como `image_asset_pointer`.
+Requiere cuenta (por eso `❌` en anónima). Verificado en vivo con go; free usa el
+mismo camino autenticado, con menos cupo de `file_upload` (5 vs 80).
 
 ## Límites (cupos por período)
 
@@ -64,8 +72,9 @@ DALL·E) — no la rechaza ni pide upgrade —, pero la generación **devuelve v
 
 - **Anónima** → solo chat, traducir, modelos y límites. Nada de cuenta, historial,
   archivos, voz ni imágenes.
-- **Free** → casi todo (15/16), **incluida voz completa (TTS + STT)**. Lo único
-  bloqueado es **imágenes**; los cupos son mínimos y el storage 8× menor.
+- **Free** → casi todo (16/17), **incluida voz completa (TTS + STT) y visión**. Lo
+  único bloqueado es **generar imágenes** (la visión/input sí anda); los cupos son
+  mínimos y el storage 8× menor.
 - **Go** → todo, con cupos ~15–37× mayores, 8× más storage e imágenes.
 
 La diferencia real **free vs go** no es la *superficie de API* (casi idéntica) sino

@@ -590,12 +590,15 @@ custom GPTs, TTS, and image generation.
 | Image generation | ❌ | ✅ |
 | Text-to-speech | ❌ | ✅ |
 | Speech-to-text | ❌ | ✅ |
-| Image input (vision) | ❌ | ❌ |
+| Image input (vision, `image_url`) | ❌ | ✅ |
 | Function calling (`tool_calls` in the response) | ❌ | ❌ |
 | `temperature`, `top_p`, `max_tokens`, penalties, `seed`, `n` | ❌ | ❌ |
 
-The last three are ❌ in *both* modes and won't change with an account: vision isn't
-exposed on this endpoint, the backend's tools run server-side so it never returns
+Vision accepts OpenAI-style `image_url` parts (`data:` URLs or `http(s)` URLs);
+each image is uploaded to the account's file store and attached to the message.
+It needs an account — the anonymous backend has no file upload — so an image with
+no token is a fast `401`. The last two rows are ❌ in *both* modes and won't change
+with an account: the backend's tools run server-side so it never returns
 `tool_calls`, and the conversation protocol simply has no sampling fields — those are
 accepted and then dropped, with an `X-Proxy-Ignored-Params` response header listing
 which ones.
