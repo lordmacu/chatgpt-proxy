@@ -672,6 +672,55 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Account",
+      "item": [
+        {
+          "name": "Account",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/account",
+            "description": "Plan, suscripción y features de la cuenta autenticada. Requiere CHATGPT_ACCESS_TOKEN (401 si anónimo).",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('Has plan_type', function(){ pm.expect(pm.response.json()).to.have.property('plan_type'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Rate Limits",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/limits",
+            "description": "Rate-limit / uso por feature (limits_progress: remaining + reset_after). Llama a /conversation/init, no gasta mensaje.",
+            "header": []
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Response OK', () => pm.response.to.have.status(200));",
+                  "pm.test('Has limits_progress', function(){ pm.expect(pm.response.json()).to.have.property('limits_progress'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
     }
   ]
 }

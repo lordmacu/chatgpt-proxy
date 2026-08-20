@@ -866,6 +866,158 @@
           }
         }
       }
+    },
+    "/v1/account": {
+      "get": {
+        "summary": "Account",
+        "description": "Plan, suscripción y features habilitadas de la cuenta autenticada. Proxy a `/backend-api/accounts/check`. Requiere cuenta (CHATGPT_ACCESS_TOKEN); anónimo → 401.",
+        "operationId": "account",
+        "tags": [
+          "Account"
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumen de la cuenta",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "account_id": {
+                      "type": "string",
+                      "example": "092dcce0-7a57-4273-a9ed-a36ee7dd8504"
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "plan_type": {
+                      "type": "string",
+                      "example": "go"
+                    },
+                    "is_deactivated": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "subscription": {
+                      "type": "object",
+                      "properties": {
+                        "plan": {
+                          "type": "string",
+                          "example": "chatgptgoplan"
+                        },
+                        "active": {
+                          "type": "boolean",
+                          "example": true
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "example": "2026-09-06T00:28:46+00:00"
+                        },
+                        "renews_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "cancels_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "billing_period": {
+                          "type": "string",
+                          "example": "monthly"
+                        },
+                        "billing_currency": {
+                          "type": "string",
+                          "example": "USD"
+                        },
+                        "is_delinquent": {
+                          "type": "boolean",
+                          "example": false
+                        }
+                      }
+                    },
+                    "features": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "example": [
+                        "canvas",
+                        "browsing_available",
+                        "beta_features"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autenticado"
+          }
+        }
+      }
+    },
+    "/v1/limits": {
+      "get": {
+        "summary": "Rate Limits",
+        "description": "Estado de rate-limit / uso por feature. Los límites no están en accounts/check: viven en `limits_progress` del flujo de conversación. Llama a `/conversation/init` (barato, no gasta mensaje). Funciona autenticado y anónimo.",
+        "operationId": "limits",
+        "tags": [
+          "Account"
+        ],
+        "responses": {
+          "200": {
+            "description": "Límites por feature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "limits_progress": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "feature_name": {
+                            "type": "string",
+                            "example": "image_gen"
+                          },
+                          "remaining": {
+                            "type": "integer",
+                            "example": 109
+                          },
+                          "reset_after": {
+                            "type": "string",
+                            "example": "2026-08-21T03:00:34+00:00"
+                          }
+                        }
+                      }
+                    },
+                    "model_limits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "Se llena al acercarse al cap de mensajes"
+                    },
+                    "blocked_features": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "default_model_slug": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
