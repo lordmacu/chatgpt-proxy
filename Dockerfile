@@ -28,8 +28,18 @@ COPY chatgpt_client.py main.py auth.py dpop.py session_web.py \
 ENV PYTHONUNBUFFERED=1
 # The anonymous conversation index. It holds the device ids that are the only
 # way to reopen an anonymous conversation, so it belongs on a MOUNTED VOLUME:
-# left inside the image layer it is wiped by the next deploy, which is the
-# exact durability the index exists to provide.
+# left inside the image layer it is wiped by the next deploy, which is the exact
+# durability the index exists to provide.
+#
+# /app/data is not an arbitrary choice: the Coolify deployment already has a
+# persistent storage registered there (volume rs3okqn9jehjs7k6mj43haxm-data), so
+# this path lands in it with no further configuration. Note that Coolify builds
+# this app with build_pack "dockerfile" and never reads docker-compose.yml, so
+# the volume declared there covers local `docker compose up` and nothing else.
+#
+# There is deliberately no `VOLUME /app/data` instruction. Without a NAMED
+# volume it creates an anonymous one, which survives a container restart but not
+# the recreation a deploy performs -- the appearance of durability without it.
 ENV CONV_DB_PATH=/app/data/conversations.db
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

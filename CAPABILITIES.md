@@ -69,8 +69,13 @@ SQLite ([`conv_store.py`](conv_store.py)) — **solo el binding
 `conversation_id → device_id`, nunca los mensajes**, que siguen siendo del
 vendor. El listado sí es local: `/backend-anon/conversations` devuelve `total=0`
 incluso para el device dueño de dos conversaciones vivas.
-En Docker **exige un volumen montado** (`CONV_DB_PATH`, ver `docker-compose.yml`):
-sin él el índice se borra en cada deploy, que es justo lo que vino a evitar.
+El índice necesita un volumen o se borra en cada deploy, que es justo lo que vino
+a evitar. **En producción ya está**: Coolify tiene registrado el persistent
+storage `rs3okqn9jehjs7k6mj43haxm-data` en `/app/data`, que es la ruta a la que
+el Dockerfile apunta `CONV_DB_PATH`. Ojo con una trampa: Coolify construye esta
+app con `build_pack: dockerfile`, así que **el `docker-compose.yml` del repo no
+se lee en producción** — su volumen `proxy-data` sirve solo para `docker compose
+up` local.
 Ojo con el alcance: las filas se separan por el bearer token, y quien no manda
 token cae en el namespace `anonymous` compartido — el mismo que ya comparten el
 pool de sesiones y el file store.
