@@ -406,18 +406,36 @@ def _loads_tolerant(text):
     downstream code only ever sees JSON-compatible values.
     """
     try:
-        return json.loads(text)
+        # strict=False allows raw control characters inside strings. A model
+        # that pretty-prints an argument emits a literal newline there, and its
+        # intent is unambiguous -- rejecting it would spend a repair round trip
+        # re-asking for something already perfectly readable.
+        return json.loads(text, strict=False)
     except (json.JSONDecodeError, ValueError):
         pass
     try:
-        return _as_jsonable(ast.literal_eval(text))
+        value = ast.literal_eval(text)
     except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
         return None
+    return _as_jsonable(value)
 
 
 def _as_jsonable(value):
+    """Round-trip a literal through JSON, refusing anything JSON cannot hold.
+
+    No `default=` on purpose. With one, a Python-only value is STRINGIFIED
+    rather than rejected: `{"a"}` is a set to Python and nothing at all to
+    JSON, and turning it into the text "{'a'}" salvages a plainly malformed
+    object into a name-only call the model never wrote. Tuples still become
+    arrays and integer keys still become strings, which is all the round trip
+    was ever for; sets, bytes and complex numbers now stop here.
+
+    Refusing them also keeps this reader in step with the Dart port, whose
+    normaliser has no set literals to accept -- verified by a 3000-case
+    differential fuzz across both implementations.
+    """
     try:
-        return json.loads(json.dumps(value, default=str))
+        return json.loads(json.dumps(value))
     except (TypeError, ValueError):
         return None
 

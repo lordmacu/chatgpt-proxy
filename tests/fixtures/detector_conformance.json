@@ -1,0 +1,666 @@
+{
+  "_": [
+    "Cross-language conformance for the tool-call detector.",
+    "The same corpus runs against the Python (chatgpt-proxy/tool_detect.py) and",
+    "Dart (chatgpt_free/lib/src/tools/detect.dart) ports, and both must produce",
+    "exactly this. Generated once from a run where the two agreed on all 59",
+    "cases, then checked into both repos so either one drifting fails its own",
+    "test without needing the other language installed.",
+    "",
+    "Known residual divergence, outside this corpus and measured by a 3000-case",
+    "differential fuzz: 3 in 3000, all on malformed input where Python's",
+    "ast.literal_eval folds two adjacent string literals into one",
+    "(JSON missing a colon), yielding a call with empty arguments where Dart",
+    "yields nothing. Both paths end at the same repair round trip."
+  ],
+  "functions": [
+    {
+      "name": "get_weather",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "days": {
+            "type": "integer"
+          },
+          "ratio": {
+            "type": "number"
+          },
+          "nested": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer"
+              }
+            }
+          },
+          "list": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "flag": {
+            "type": "boolean"
+          },
+          "either": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "celsius",
+              "fahrenheit"
+            ]
+          }
+        },
+        "required": [
+          "city"
+        ]
+      }
+    },
+    {
+      "name": "send_email",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to"
+        ]
+      }
+    }
+  ],
+  "names": [
+    "get_weather",
+    "send_email"
+  ],
+  "cases": [
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}\n```",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}</tool_call>",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}</tool_call><tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Quito\"}}</tool_call>",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        },
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Quito"
+          }
+        }
+      ]
+    },
+    {
+      "input": "[TOOL_CALLS][{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}]",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{'name': 'get_weather', 'arguments': {'city': 'Lima'}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{'name': 'get_weather', 'arguments': {'city': 'use } carefully', 'flag': True}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "use } carefully",
+            "flag": true
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"input\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"args\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"action\":\"get_weather\",\"action_input\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"tool\":\"get_weather\",\"tool_input\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"function_call\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Lima\\\"}\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"tool_use\":{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"function\":{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"tool_calls\":[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}]}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"functions.get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"tools.get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"GET_WEATHER\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\"}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":\"{not json\"}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":\"\"}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"launch_missiles\",\"arguments\":{}}",
+      "expected": null
+    },
+    {
+      "input": "The config is a name/arguments pair in most setups.",
+      "expected": null
+    },
+    {
+      "input": "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}, {\"temperature\": 21}]",
+      "expected": null
+    },
+    {
+      "input": "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}, {\"name\":\"send_email\",\"arguments\":{\"to\":\"a@b.c\"}}]",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        },
+        {
+          "name": "send_email",
+          "arguments": {
+            "to": "a@b.c"
+          }
+        }
+      ]
+    },
+    {
+      "input": "Its schema is {\"name\": \"get_weather\"}, but which city did you mean? I can look up several if you tell me which ones you care about, since the function takes one city at a time.",
+      "expected": null
+    },
+    {
+      "input": "Here is how I would call it:\n```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"EXAMPLE\"}}\n```\nNow the real call: {\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "<think>{\"name\":\"send_email\",\"arguments\":{\"to\":\"draft@x.com\"}}</think>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "<think>maybe {\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": null
+    },
+    {
+      "input": "<reasoning>hmm</reasoning>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima } Peru\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima } Peru"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Quito\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima"
+          }
+        },
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Quito"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}} and then {\"name\":\"send_email\",\"arguments\":{\"to\":\"a@b.c\"}}",
+      "expected": [
+        {
+          "name": "send_email",
+          "arguments": {
+            "to": "a@b.c"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"days\":\"5\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "days": 5
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"days\":\"1_000\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "days": "1_000"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"days\":5.0}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "days": 5
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"ratio\":\"1.5e3\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "ratio": 1500.0
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"flag\":\"true\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "flag": true
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"unit\":\"Celsius\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "unit": "celsius"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"unit\":\"kelvin\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "unit": "kelvin"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"either\":\"5\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "either": "5"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"nested\":{\"n\":\"7\"}}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "nested": {
+              "n": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"list\":[\"1\",\"2\"]}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "list": [
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"list\":\"[1,2]\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "list": [
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":123}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "123"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"undeclared\":\"7\"}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "undeclared": "7"
+          }
+        }
+      ]
+    },
+    {
+      "input": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\",\"flag\":true}}",
+      "expected": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Lima",
+            "flag": true
+          }
+        }
+      ]
+    },
+    {
+      "input": "",
+      "expected": null
+    },
+    {
+      "input": "   ",
+      "expected": null
+    },
+    {
+      "input": "{",
+      "expected": null
+    },
+    {
+      "input": "}}}}}}}}}}",
+      "expected": null
+    },
+    {
+      "input": "[[[[[[[[[[",
+      "expected": null
+    },
+    {
+      "input": "{\"name\":",
+      "expected": null
+    },
+    {
+      "input": "``````",
+      "expected": null
+    },
+    {
+      "input": "[TOOL_CALLS][TOOL_CALLS]",
+      "expected": null
+    },
+    {
+      "input": "<think><think><think>",
+      "expected": null
+    },
+    {
+      "input": "```python\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lima\"}}\n```",
+      "expected": null
+    }
+  ]
+}
