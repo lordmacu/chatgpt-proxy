@@ -36,6 +36,7 @@ import re
 import uuid
 from typing import Any, Optional
 
+import tool_detect as _detect
 from chatgpt_client import ChatGPTSession, QuotaExceededError, _extract_json
 
 # The three things the model is allowed to emit. A marker rather than "reply in
@@ -156,43 +157,68 @@ def build_prompt(functions: list[dict], user_text: str, tool_choice: Any = "auto
     return "\n".join(lines)
 
 
-def parse_envelope(text: str) -> tuple[Any, list]:
+def parse_envelope(text: str, valid_names: set, functions=None) -> tuple[Any, list]:
     """(calls | "NEED_INFO" | None, notes).
 
-    Tolerant on purpose: the model occasionally fences the output or repeats the
-    marker, and neither is worth spending a second upstream message on.
+    Two layers, in this order.
+
+    The MARKERS are ours and explicit: the extractor prompt asks for exactly
+    one of three, so NEED_INFO and NO_TOOL are read first and decide outright.
+    They have no equivalent anywhere else -- "no function fits" and "a required
+    parameter was never stated" are answers this design asks for, not dialects
+    a model happens to emit.
+
+    Everything else goes through tool_detect, ported from llm-libre, which
+    reads a call out of any dialect a prompted model actually produces: fenced
+    or bare JSON, <tool_call> tags, Mistral's [TOOL_CALLS], JSONL runs, Python
+    literals, ReAct action/action_input, wrapper envelopes, leaked `functions.`
+    namespaces -- all gated on `valid_names`, so a JSON object naming anything
+    the caller did not declare stays text.
+
+    Before that second layer, every one of those cost a repair round trip, and
+    a repair round trip is one more message off an anonymous hourly allowance.
+
+    `valid_names` is the allow-list AFTER tool_choice has narrowed it (see
+    tool_detect.allowed_names) -- passing the raw declared set here would let a
+    forced choice be ignored by the model and still validate.
     """
     t = (text or "").strip()
     notes: list = []
+
+    # The markers survive fences, so this pre-strip is only for finding them;
+    # detection below reads fences properly on its own.
+    unfenced = re.sub(r"```[a-zA-Z]*\n?", "", t).replace("```", "").strip()
     if "```" in t:
         notes.append("fenced")
-        t = re.sub(r"```[a-zA-Z]*\n?", "", t).replace("```", "").strip()
 
-    if NEED_INFO in t and SENTINEL not in t:
-        payload = t.split(NEED_INFO, 1)[1].strip()
+    if NEED_INFO in unfenced and SENTINEL not in unfenced:
+        payload = unfenced.split(NEED_INFO, 1)[1].strip()
         try:
             return "NEED_INFO", notes + [json.loads(_extract_json(payload))]
         except (ValueError, TypeError):
             return "NEED_INFO", notes
 
-    if t.startswith(NO_CALL) or (NO_CALL in t and SENTINEL not in t):
+    if unfenced.startswith(NO_CALL) or (NO_CALL in unfenced and SENTINEL not in unfenced):
         return [], notes
 
-    if SENTINEL not in t:
-        return None, notes + ["no-marker"]
-    if t.count(SENTINEL) > 1:
-        notes.append("duplicate-marker")
-    if not t.startswith(SENTINEL):
-        notes.append("prose-before")
-
-    payload = t.split(SENTINEL, 1)[1].split(SENTINEL)[0].strip()
-    for candidate in (payload, _extract_json(payload)):
-        try:
-            calls = json.loads(candidate).get("calls")
-        except (ValueError, AttributeError):
-            continue
-        if isinstance(calls, list):
+    if SENTINEL in unfenced:
+        if unfenced.count(SENTINEL) > 1:
+            notes.append("duplicate-marker")
+        if not unfenced.startswith(SENTINEL):
+            notes.append("prose-before")
+        payload = unfenced.split(SENTINEL, 1)[1].split(SENTINEL)[0].strip()
+        calls = _detect.parse_tool_calls(payload, valid_names, functions)
+        if calls is not None:
             return calls, notes
+        notes.append("marker-payload-unreadable")
+    else:
+        notes.append("no-marker")
+
+    # No usable marker payload. The model may still have called, just not in
+    # the shape it was asked for -- read the whole reply as any dialect.
+    calls = _detect.parse_tool_calls(t, valid_names, functions)
+    if calls is not None:
+        return calls, notes + ["dialect"]
     return None, notes + ["invalid-json"]
 
 
@@ -341,8 +367,16 @@ async def extract(
     """
     model  = model or EXTRACTOR_MODEL
     prompt = build_prompt(functions, user_text, tool_choice)
+
+    # tool_choice narrows what the model is ALLOWED to have called, not just
+    # what it was asked to call. A forced function authorises only itself, so a
+    # model that ignores the instruction and calls a different declared
+    # function now produces nothing instead of a call that validated cleanly
+    # and ran the wrong thing.
+    valid = _detect.allowed_names(functions, tool_choice)
+
     raw    = await _ask(prompt, model)
-    calls, notes = parse_envelope(raw)
+    calls, notes = parse_envelope(raw, valid, functions)
     spent  = 1
 
     if calls == "NEED_INFO":
@@ -361,7 +395,7 @@ async def extract(
             errors   = "; ".join(errors) if errors else "output did not match the required format",
         )
         raw2 = await _ask(repair, model)
-        calls2, notes2 = parse_envelope(raw2)
+        calls2, notes2 = parse_envelope(raw2, valid, functions)
         if calls2 == "NEED_INFO":
             missing = next((n for n in notes2 if isinstance(n, dict)), None)
             return ToolExtraction("need_info", need_info=missing, requests=spent,
@@ -384,7 +418,7 @@ async def extract(
             call    = json.dumps(calls, ensure_ascii=False),
             schemas = json.dumps(functions, ensure_ascii=False),
         ), model)
-        calls3, _ = parse_envelope(audited)
+        calls3, _ = parse_envelope(audited, valid, functions)
         # Only accept the audit when it is at least as valid as what it replaces.
         if isinstance(calls3, list) and calls3 and not validate_calls(calls3, functions):
             calls = calls3

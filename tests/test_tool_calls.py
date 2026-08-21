@@ -16,6 +16,10 @@ ORDER = {"name": "create_order", "description": "Create an order.",
              "required": ["items"]}}
 FUNCS = [WEATHER, ORDER]
 
+# The allow-list detection is gated on: the functions declared in THIS
+# request, after tool_choice has narrowed them.
+NAMES = {"get_weather", "create_order"}
+
 
 # --- which tools this proxy has to emulate ---------------------------------
 
@@ -68,56 +72,56 @@ def test_the_prompt_denies_the_model_its_own_knowledge():
 
 def test_a_clean_envelope_parses():
     raw = tc.SENTINEL + '{"calls":[{"name":"get_weather","arguments":{"city":"Bogotá"}}]}'
-    calls, notes = tc.parse_envelope(raw)
+    calls, notes = tc.parse_envelope(raw, NAMES)
     assert calls == [{"name": "get_weather", "arguments": {"city": "Bogotá"}}]
     assert notes == []
 
 
 def test_markdown_fences_are_survivable():
     raw = "```json\n" + tc.SENTINEL + '{"calls":[{"name":"get_weather","arguments":{"city":"Lima"}}]}\n```'
-    calls, notes = tc.parse_envelope(raw)
+    calls, notes = tc.parse_envelope(raw, NAMES)
     assert calls[0]["arguments"]["city"] == "Lima"
     assert "fenced" in notes
 
 
 def test_a_repeated_marker_takes_the_first_envelope_and_flags_it():
     body = '{"calls":[{"name":"get_weather","arguments":{"city":"Quito"}}]}'
-    calls, notes = tc.parse_envelope(tc.SENTINEL + body + tc.SENTINEL + body)
+    calls, notes = tc.parse_envelope(tc.SENTINEL + body + tc.SENTINEL + body, NAMES)
     assert len(calls) == 1
     assert "duplicate-marker" in notes
 
 
 def test_prose_before_the_marker_is_recovered_and_flagged():
     raw = "Claro, aquí tienes:\n" + tc.SENTINEL + '{"calls":[{"name":"get_weather","arguments":{"city":"Cali"}}]}'
-    calls, notes = tc.parse_envelope(raw)
+    calls, notes = tc.parse_envelope(raw, NAMES)
     assert calls[0]["arguments"]["city"] == "Cali"
     assert "prose-before" in notes
 
 
 def test_no_tool_is_an_empty_call_list_not_a_failure():
-    assert tc.parse_envelope(tc.NO_CALL) == ([], [])
+    assert tc.parse_envelope(tc.NO_CALL, NAMES) == ([], [])
 
 
 def test_need_info_carries_the_missing_parameters():
     raw = tc.NEED_INFO + '{"function":"search_flights","missing":["origin","date"]}'
-    status, notes = tc.parse_envelope(raw)
+    status, notes = tc.parse_envelope(raw, NAMES)
     assert status == "NEED_INFO"
     assert notes[0]["missing"] == ["origin", "date"]
 
 
 def test_plain_prose_is_not_mistaken_for_a_call():
-    calls, notes = tc.parse_envelope("La capital de Francia es París.")
+    calls, notes = tc.parse_envelope("La capital de Francia es París.", NAMES)
     assert calls is None and "no-marker" in notes
 
 
 def test_a_json_answer_without_the_marker_is_not_a_call():
     # A user asking for a JSON example must not trip the extractor.
-    calls, _ = tc.parse_envelope('{"calls":[{"name":"whatever"}]}')
+    calls, _ = tc.parse_envelope('{"calls":[{"name":"whatever"}]}', NAMES)
     assert calls is None
 
 
 def test_broken_json_after_the_marker_reports_invalid():
-    calls, notes = tc.parse_envelope(tc.SENTINEL + '{"calls":[{"name":')
+    calls, notes = tc.parse_envelope(tc.SENTINEL + '{"calls":[{"name":', NAMES)
     assert calls is None and "invalid-json" in notes
 
 
