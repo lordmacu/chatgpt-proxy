@@ -345,8 +345,11 @@ class ChatGPTSession:
               -> {status:"success", upload_url:<azure signed>, file_id:"file-..."}
             PUT <upload_url>  (x-ms-blob-type: BlockBlob)  <raw bytes>
 
-        Requires an authenticated account -- the anonymous backend exposes no
-        file upload. Returns the dict stream_message() expects in `images`.
+        Requires an authenticated account. The anonymous backend does answer
+        POST /backend-anon/files with a signed URL, and the blob PUT lands --
+        but the finalize step below 401s there, so the file never becomes
+        readable and the attempt still burns one of the three uploads allowed
+        per 24 hours. Returns the dict stream_message() expects in `images`.
         """
         await self.ensure_ready()
         size = len(data)

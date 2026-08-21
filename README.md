@@ -598,8 +598,12 @@ custom GPTs, TTS, and image generation.
 
 Vision accepts OpenAI-style `image_url` parts (`data:` URLs or `http(s)` URLs);
 each image is uploaded to the account's file store and attached to the message.
-It needs an account — the anonymous backend has no file upload — so an image with
-no token is a fast `401`. Sampling parameters are ❌ in *both* modes and won't change
+It needs an account, so an image with no token is a fast `401`. The anonymous
+backend does have `POST /backend-anon/files` — it answers 200 with a signed
+URL and the blob upload succeeds — but finalising the file
+(`POST /files/{id}/uploaded`) answers `401`, so the upload never becomes
+readable while still spending one of the three uploads allowed per 24 hours.
+Anonymous attachments therefore have to be inlined as text. Sampling parameters are ❌ in *both* modes and won't change
 with an account: the conversation protocol simply has no such fields, so they are
 accepted and then dropped, with an `X-Proxy-Ignored-Params` response header listing
 which ones.
