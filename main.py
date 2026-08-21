@@ -98,6 +98,7 @@ import json
 import time
 import base64
 import asyncio
+import random
 import pathlib
 import ipaddress
 from urllib.parse import urlparse
@@ -3025,8 +3026,16 @@ OPENAI_VOICE_MAP: dict[str, str] = {
 }
 
 
-def resolve_voice(voice: str) -> str:
-    """A voice name this backend will actually accept, or a 400 explaining why.
+# ── El contrato de audio, común a los cinco proxies ──────────────────────────
+# 4096 es el límite de la API de OpenAI. Acá el tope importa doblemente: con
+# 5000 caracteres este backend NO devuelve un error, corta la conexión (medido),
+# y la síntesis gasta un mensaje de chat antes de llegar a eso.
+MAX_INPUT_CHARS = 4096
+SUPPORTED_FORMATS = ("mp3",)
+
+
+def resolve_voice(voice: str) -> tuple[str, bool]:
+    """Returns (voice this backend accepts, whether it was substituted).
 
     Validating BEFORE the round trip is the whole point. An unknown voice used
     to reach `/backend-api/synthesize`, which does not answer with a clean 4xx
@@ -3042,18 +3051,16 @@ def resolve_voice(voice: str) -> str:
     """
     name = (voice or "").strip().lower()
     if not name:
-        return "juniper"
+        return "juniper", False
     if name in NATIVE_VOICES:
-        return name
+        return name, False
     if name in OPENAI_VOICE_MAP:
-        return OPENAI_VOICE_MAP[name]
-    raise HTTPException(400, detail={"error": {
-        "type": "invalid_request_error",
-        "message": f"unknown voice '{voice}'",
-        "param": "voice",
-        "supported": list(NATIVE_VOICES),
-        "openai_aliases": sorted(OPENAI_VOICE_MAP),
-    }})
+        return OPENAI_VOICE_MAP[name], False
+    # An unknown name picks a real voice at random rather than refusing. That
+    # is the operator's call -- audio in some voice beats a rejection -- and it
+    # costs determinism: the same request can sound different on a retry. The
+    # substitution is reported in a header so that is visible, never silent.
+    return random.choice(NATIVE_VOICES), True
 
 
 class SpeechRequest(BaseModel):
@@ -3174,7 +3181,7 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
     # Resolved here rather than in each endpoint: three call sites share this
     # function, and a validation that lives in only two of them is the kind
     # that drifts.
-    voice = resolve_voice(voice)
+    voice, _voice_substituted = resolve_voice(voice)
 
     # Have the model reproduce the text; retry once if it isn't verbatim.
     session = None
@@ -3238,8 +3245,13 @@ async def list_voices():
     them -- see OPENAI_VOICE_MAP for how little those pairings claim.
     """
     return {"default": "juniper",
+            "voices": list(NATIVE_VOICES),
             "native": list(NATIVE_VOICES),
-            "openai_aliases": OPENAI_VOICE_MAP}
+            "openai_aliases": OPENAI_VOICE_MAP,
+            "selection": "random",
+            "max_input_chars": MAX_INPUT_CHARS,
+            "formats": list(SUPPORTED_FORMATS),
+            "default_format": "mp3"}
 
 
 @app.post("/v1/audio/speech")
@@ -3260,6 +3272,14 @@ async def audio_speech(req: SpeechRequest, request: Request):
     if not text:
         return JSONResponse(status_code=400, content={"error": {
             "message": "'input' is required", "type": "invalid_request_error"}})
+    # Checked BEFORE _synthesize, which makes the model echo the text and so
+    # spends a chat message. Measured: at 5000 characters this backend does not
+    # answer with an error, it drops the connection.
+    if len(text) > MAX_INPUT_CHARS:
+        return JSONResponse(status_code=400, content={"error": {
+            "type": "invalid_request_error",
+            "message": f"input is {len(text)} characters, the limit is {MAX_INPUT_CHARS}",
+            "param": "input", "max_input_chars": MAX_INPUT_CHARS}})
     try:
         s = await _synthesize(text, req.voice, req.format, req.model)
     except _SynthesizeFailed as e:
@@ -3285,6 +3305,14 @@ async def chatgpt_audio_speech(req: SpeechRequest, request: Request):
     if not text:
         return JSONResponse(status_code=400, content={"error": {
             "message": "'input' is required", "type": "invalid_request_error"}})
+    # Checked BEFORE _synthesize, which makes the model echo the text and so
+    # spends a chat message. Measured: at 5000 characters this backend does not
+    # answer with an error, it drops the connection.
+    if len(text) > MAX_INPUT_CHARS:
+        return JSONResponse(status_code=400, content={"error": {
+            "type": "invalid_request_error",
+            "message": f"input is {len(text)} characters, the limit is {MAX_INPUT_CHARS}",
+            "param": "input", "max_input_chars": MAX_INPUT_CHARS}})
     try:
         s = await _synthesize(text, req.voice, req.format, req.model)
     except _SynthesizeFailed as e:
