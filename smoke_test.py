@@ -9,8 +9,8 @@ Run against a locally-running proxy (started with the account's token):
 Or point it elsewhere:  python smoke_test.py http://127.0.0.1:8890
 
 Read-only endpoints are always exercised. The ones that COST a message
-(chat, image, speech) are only run with --spend, so a free account's tiny quota
-isn't burned by accident.
+(chat, tool-calls, image, speech) are only run with --spend, so a free account's
+tiny quota isn't burned by accident.
 """
 import json
 import sys
@@ -116,6 +116,24 @@ def main():
         sc, b = call("POST", "/v1/chat/completions", json={"model": "auto", "stream": False,
                      "messages": [{"role": "user", "content": "di solo: ok"}]})
         row("POST /v1/chat/completions", sc, b[:50])
+        # Function calling is emulated by a real extraction request, so it costs
+        # a message like any other turn. The note carries `status` because a 200
+        # alone does not say whether the model actually produced the call --
+        # "no_call" is a 200 too, and it means the opposite.
+        sc, b = call("POST", "/v1/tool-calls", json={
+            "input": "¿Qué temperatura hace en Bogotá?",
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather", "description": "Current weather for a city.",
+                "parameters": {"type": "object",
+                               "properties": {"city": {"type": "string"}},
+                               "required": ["city"]}}}]})
+        note = b[:50]
+        try:
+            parsed = json.loads(b)
+            note = f"status={parsed.get('status')} calls={len(parsed.get('tool_calls') or [])}"
+        except Exception:
+            pass
+        row("POST /v1/tool-calls", sc, note)
         sc, b = call("POST", "/v1/audio/speech", json={"input": "hola", "voice": "juniper"})
         row("POST /v1/audio/speech", sc, b[:50])
         sc, b = call("POST", "/v1/images/generations", json={"prompt": "a small red dot"})

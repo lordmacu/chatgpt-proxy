@@ -85,7 +85,7 @@ def effective(state: AccountState) -> dict:
     """The eleven booleans, for this account state. Measured, not guessed.
 
     Every False below was observed, and CAPABILITIES.md records how:
-      - anonymous reaches 5 of 14 endpoints; `synthesize`, `library`, `gizmos`
+      - anonymous reaches 6 of 15 endpoints; `synthesize`, `library`, `gizmos`
         and the file APIs have no /backend-anon variant at all, so everything
         that needs one is False.
       - `tools` follows `tool_calls.EMULATION_ENABLED`. Native function calling

@@ -11,6 +11,7 @@ Qué se puede hacer con el proxy según el tipo de cuenta detrás del token:
 |---|:---:|:---:|:---:|
 | Chat (`POST /v1/chat/completions`) | ✅ | ✅ | ✅ |
 | Web search (en el chat, `web_search: true`) | ✅ | ✅ | ✅ |
+| **Function calling** (`tool_calls` en el chat, `POST /v1/tool-calls`) | ✅ ³ | ✅ ³ | ✅ ³ |
 | Modelos (`GET /v1/models`), `GET /v1/session/me` | ✅ | ✅ | ✅ |
 | Traducir (`POST /v1/translate`) | ✅ | ✅ | ✅ |
 | Límites (`GET /v1/limits`) | ✅ | ✅ | ✅ |
@@ -24,7 +25,16 @@ Qué se puede hacer con el proxy según el tipo de cuenta detrás del token:
 | STT (`POST /v1/audio/transcriptions`) | ❌ | ✅ | ✅ |
 | **Imágenes** (`POST /v1/images/generations`) | ❌ | **❌ bloqueado** | ✅ |
 | **Visión** (imagen como input en el chat, `image_url`) | ❌ | ✅ ² | ✅ |
-| **Endpoints accesibles** | **5/15** | **16/17** | **17/17** |
+| **Endpoints accesibles** | **6/15** | **17/18** | **18/18** |
+
+Los totales son la salida de `smoke_test.py --spend`: **anónima (6/15) y Go
+(18/18) remedidas el 2026-08-21**; la columna free se derivó de su medición
+anterior (16/17) sumando `/v1/tool-calls`, que anda hasta sin cuenta. Los
+denominadores difieren porque hay sondas condicionales: `gizmos/{id}`,
+`conversations/{id}` y `library/{id}/download` solo se prueban si la cuenta
+tiene un gizmo, una conversación y un archivo. Ojo con `images`: tarda 27–44 s
+y falló una vez con 503 teniendo 120 de cupo, pero respondió 200 dos veces
+seguidas al reintentar — es lento y ocasionalmente vacío, no un bloqueo de plan.
 
 `❌` en anónima = 401 "needs an authenticated account" (el endpoint requiere
 cuenta; `synthesize`, `library`, `gizmos`, etc. no tienen variante
@@ -36,6 +46,17 @@ Sube la imagen al file store de la cuenta (`POST /files` → PUT al blob →
 `POST /files/{id}/uploaded`) y la adjunta al turno como `image_asset_pointer`.
 Requiere cuenta (por eso `❌` en anónima). Verificado en vivo con go; free usa el
 mismo camino autenticado, con menos cupo de `file_upload` (5 vs 80).
+
+³ **Function calling** anda en las tres porque **no es una capacidad del backend**:
+ninguno de los dos backends la tiene (con `tool_choice:"required"` devuelven
+`tool_calls:None` y prosa, medido 0/3 dos veces). El proxy la **emula** — ver
+[`tool_calls.py`](tool_calls.py) — y devuelve `tool_calls` reales con
+`finish_reason: "tool_calls"`, streaming incluido, así que no depende del plan.
+Cuesta **un mensaje extra** por turno que declare funciones: decidir *si* hay que
+llamar es una petición aparte, así que un turno donde ninguna función aplica gasta
+dos. Un parámetro requerido que la petición no dice se responde preguntando
+(`status: "need_info"`), no adivinando. `TOOL_EMULATION=0` la apaga, y entonces
+`GET /health` reporta `tools: false` — es el único caso en que esta fila es ❌.
 
 ## Límites (cupos por período)
 
@@ -70,9 +91,9 @@ DALL·E) — no la rechaza ni pide upgrade —, pero la generación **devuelve v
 
 ## Resumen
 
-- **Anónima** → solo chat, traducir, modelos y límites. Nada de cuenta, historial,
-  archivos, voz ni imágenes.
-- **Free** → casi todo (16/17), **incluida voz completa (TTS + STT) y visión**. Lo
+- **Anónima** → solo chat (con function calling), traducir, modelos y límites. Nada
+  de cuenta, historial, archivos, voz ni imágenes.
+- **Free** → casi todo (17/18), **incluida voz completa (TTS + STT) y visión**. Lo
   único bloqueado es **generar imágenes** (la visión/input sí anda); los cupos son
   mínimos y el storage 8× menor.
 - **Go** → todo, con cupos ~15–37× mayores, 8× más storage e imágenes.
@@ -89,7 +110,7 @@ python compare_accounts.py "<TOKEN_A>" "<TOKEN_B>"   # diff entre dos
 # smoke test (con el proxy corriendo con esa cuenta):
 CHATGPT_ACCESS_TOKEN=<token> python -m uvicorn main:app --port 8899 &
 python smoke_test.py                # read-only
-python smoke_test.py --spend        # incluye chat/TTS/imágenes (gasta cuota)
+python smoke_test.py --spend        # incluye chat/tool-calls/TTS/imágenes (gasta cuota)
 ```
 
 ## El contrato de capacidades
