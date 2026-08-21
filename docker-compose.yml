@@ -1,18 +1,53 @@
+# El volumen se declara ACÁ, en el repo, no en la configuración de la app.
+#
+# Con el build pack `dockerfile` la persistencia era algo que alguien tenía que
+# crear a mano una vez por aplicación, y que se perdía si la app se recreaba.
+# `VOLUME /app/data` en el Dockerfile tampoco alcanza: Docker crea un volumen
+# ANÓNIMO nuevo por contenedor, así que documenta la intención sin persistir
+# nada entre despliegues.
+#
+# El puerto es 8890, no 8888: ese era el valor de desarrollo local y no coincide
+# con el mapeo de producción. Con el build pack anterior daba igual porque
+# Coolify imponía el suyo; con compose, este archivo ES el mapeo.
+#
+# Las variables se enumeran una por una. Coolify sustituye las que el compose
+# nombra, y una que falte acá no llega al contenedor: el fallo aparecería en
+# runtime como "no autenticado", no como un error de arranque.
+#
+# PENDIENTE, deliberadamente fuera de este cambio: `dpop_key.pem` sigue dentro
+# de la imagen, así que se regenera en cada despliegue. Moverlo al volumen
+# haría que la sesión actual —atada a esa clave— tuviera que rehacerse, y una
+# migración de infraestructura no es el lugar para arriesgar eso. Se hace
+# aparte, con la sesión lista para renovar.
 services:
-  chatgpt-proxy:
+  chatgpt:
     build: .
     ports:
-      - "8888:8000"
-    restart: unless-stopped
-    volumes:
-      # Without this the anonymous conversation index is erased on every deploy,
-      # and with it the device ids that are the only key to those conversations.
-      - proxy-data:/app/data
+      - "8890:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - EMAIL=${EMAIL:-}
+      - PASSWORD=${PASSWORD:-}
+      - TOKEN=${TOKEN:-}
+      - CHATGPT_ACCESS_TOKEN=${CHATGPT_ACCESS_TOKEN:-}
+      - CHATGPT_SESSION_COOKIE=${CHATGPT_SESSION_COOKIE:-}
+      - CHATGPT_UA=${CHATGPT_UA:-}
+      - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
+    volumes:
+      # Sin esto el índice de conversaciones anónimas se borra en cada deploy,
+      # y con él los device ids que son la única llave a esas conversaciones.
+      - chatgpt-data:/app/data
+    restart: unless-stopped
     dns:
       - 8.8.8.8
       - 1.1.1.1
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
 volumes:
-  proxy-data:
+  chatgpt-data:
