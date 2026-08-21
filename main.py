@@ -16,7 +16,9 @@ Endpoints — [A] works anonymously, [L] needs a logged-in account.
   [L] GET  /v1/account                 — plan, id
   [L] GET|POST /v1/custom-instructions — the account's custom instructions
   [L] GET  /v1/gizmos[/{id}]           — custom GPTs (also model: "g-...")
-  [L] GET  /v1/conversations[/{id}]    — server-side history (anonymous turns are never stored)
+  [L] GET  /v1/conversations           — the account's server-side history
+  [A] GET  /v1/conversations/{id}      — anonymous only while this proxy still
+                                         holds the session that created it
   [L] GET  /v1/library[...]            — the account's file library
   [L] GET  /v1/suggestions             — prompt-library starters
   [L] POST /v1/audio/transcriptions    — speech-to-text
@@ -109,7 +111,7 @@ from contextlib import asynccontextmanager
 
 from chatgpt_client import (
     SessionPool, ChatGPTSession, fetch_anon_models, BASE, _base_headers,
-    QuotaExceededError, _extract_json, _IMAGE_STORE_DIR,
+    QuotaExceededError, _extract_json, _IMAGE_STORE_DIR, _api,
 )
 import httpx as _httpx
 
@@ -2871,24 +2873,57 @@ async def conversations(request: Request):
 async def conversation_detail(conversation_id: str, request: Request):
     """A single conversation as an ordered message list.
 
-    Proxies /backend-api/conversation/{id} and flattens the raw ChatGPT `mapping`
-    tree into `messages: [{id, role, content, create_time}]`, following creation
-    order and dropping empty/system nodes. Authenticated only.
-    """
-    await require_capability("conversations")
-    if not auth.is_authenticated():
-        return _needs_account()
+    Flattens the raw ChatGPT `mapping` tree into
+    `messages: [{id, role, content, create_time}]`, following creation order and
+    dropping empty/system nodes.
 
+    Works anonymously, unlike the LISTING above. Measured 2026-08-20: an
+    anonymous conversation is readable at /backend-anon/conversation/{id} from
+    the device that created it -- 200, with the title the backend generated and
+    the full mapping. From any other device it is 404
+    `conversation_inaccessible` ("Log in to view this conversation."), and
+    /backend-anon/conversations answers 200 with an empty page no matter what.
+
+    So anonymously this can only return a conversation THIS proxy created and
+    still holds a session for: the device id is the only credential there is,
+    and a fresh one cannot read anything. A conversation whose session has been
+    evicted (see SessionPool.TTL) is gone for good, and says so rather than
+    pretending an account would fix it.
+
+    No require_capability("conversations") here: that capability is about the
+    account's server-side history, which is what the listing serves. Reading
+    back a conversation this proxy itself created is a different thing, and the
+    capability set is a contract with the gateway -- adding a twelfth key to
+    express the distinction would break it.
+    """
+    authenticated = auth.is_authenticated()
     user_id  = _get_user_id(request)
     pool     = _user_pool(user_id)
     sessions = list(pool._pool.values())
-    if sessions:
-        device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
-    else:
-        device_id, owns_client = str(uuid.uuid4()), True
-        client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
 
-    path = "/backend-api/conversation/" + conversation_id
+    if authenticated:
+        await require_capability("conversations")
+        if sessions:
+            device_id, client, owns_client = sessions[0].device_id, sessions[0].client, False
+        else:
+            device_id, owns_client = str(uuid.uuid4()), True
+            client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
+    else:
+        # The creating device, or nothing: any other device gets a 404 from the
+        # vendor, so guessing one would turn "we no longer hold that session"
+        # into an opaque upstream error.
+        owner = next((s for s in sessions if s.conversation_id == conversation_id), None)
+        if owner is None:
+            raise HTTPException(404, detail={"error": {
+                "message": "No anonymous session here owns that conversation. An "
+                           "anonymous conversation is readable only from the device "
+                           "that created it, so this proxy can return one only while "
+                           "it still holds that session.",
+                "type": "not_found_error", "param": "conversation_id",
+            }})
+        device_id, client, owns_client = owner.device_id, owner.client, False
+
+    path = _api("/conversation/" + conversation_id)
     try:
         hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
         r = await client.get(f"{BASE}{path}", headers=hdrs)

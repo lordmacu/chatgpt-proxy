@@ -1138,12 +1138,12 @@
     },
     "/v1/conversations/{conversation_id}": {
       "get": {
-        "summary": "[L] Get Conversation",
+        "summary": "[A] Get Conversation",
         "operationId": "conversation_detail",
         "tags": [
           "History"
         ],
-        "description": "Conversacion como lista ordenada de mensajes. Aplana el mapping crudo. Autenticado.",
+        "description": "Conversacion como lista ordenada de mensajes. Aplana el mapping crudo. Funciona en anonimo, a diferencia del listado: una conversacion anonima se lee desde el device que la creo (desde otro device el backend responde 404 conversation_inaccessible). Por eso en anonimo solo devuelve conversaciones que este proxy creo y de las que aun conserva la sesion; si la sesion expiro responde 404 explicando por que, no 401.",
         "parameters": [
           {
             "name": "conversation_id",

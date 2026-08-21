@@ -673,7 +673,8 @@ parameters the request left out).
 | `GET /v1/account` | ❌ | ✅ | |
 | `GET` / `POST /v1/custom-instructions` | ❌ | ✅ | |
 | `GET /v1/gizmos`, `GET /v1/gizmos/{id}` | ❌ | ✅ | |
-| `GET /v1/conversations`, `GET /v1/conversations/{id}` | ❌ | ✅ | Anonymous turns are never stored server-side |
+| `GET /v1/conversations` | ❌ | ✅ | Anonymously the vendor answers 200 with an empty page, always |
+| `GET /v1/conversations/{id}` | ⚠️ | ✅ | Anonymous turns ARE stored — but readable only from the device that created them, so this proxy can serve one only while it still holds that session |
 | `GET /v1/library`, `/usage`, `/{id}/download` | ❌ | ✅ | |
 | `DELETE /v1/library/{id}`, `/trash`, `POST /{id}/restore` | ❌ | ✅ | |
 | `GET /v1/suggestions` | ❌ | ✅ | Prompt-library starters |
