@@ -262,7 +262,7 @@ OpenAI-compatible chat completions.
 | `model` | string | `auto` | Model ID |
 | `messages` | array | — | Conversation messages |
 | `stream` | boolean | `false` | Stream via SSE |
-| `response_format` | object | — | `{"type":"json_object"}` for JSON mode |
+| `response_format` | object | — | `{"type":"json_object"}` for JSON mode. Not an API flag — the backend ignores `response_format`, so it works by instructing the model. Dropping it on a later turn of the same conversation sends an explicit retraction, since the original instruction is still sitting in the history the model reads |
 | `web_search` | boolean | `null` | Force web search on/off |
 | `force_use_tools` | boolean | `null` | Enable advanced tools |
 | `force_use_canvas` | boolean | `null` | Enable Canvas mode |

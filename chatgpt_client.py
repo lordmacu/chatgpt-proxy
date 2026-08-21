@@ -238,6 +238,12 @@ class ChatGPTSession:
         self.last_used:  float = time.time()
         self._ready:     bool  = False
         self.quota_exhausted: bool = False  # True when this device_id hit its limit
+        # True once any turn in this conversation asked for JSON. json_mode is a
+        # prompt instruction, not an API flag -- response_format is inert on this
+        # backend -- so the model keeps obeying it from conversation history after
+        # the caller turns it off, which makes the toggle look broken. Tracking it
+        # lets the next non-JSON turn retract it explicitly.
+        self._json_mode_used: bool = False
 
         # Sentinel chat-requirements token: the backend hands one out (valid a few
         # minutes) and wants it echoed on every conversation request. Captured in
@@ -480,6 +486,17 @@ class ChatGPTSession:
                 "You must respond with valid JSON only. "
                 "No markdown, no explanations — just the raw JSON object or array."
             )
+            self._json_mode_used = True
+        elif self._json_mode_used:
+            # Measured 2026-08-20: without this, turn 2 of a conversation that
+            # started in JSON mode answers {"verduras":[...]} even with
+            # json_mode=False. The instruction is still sitting in the history
+            # the model reads, so switching the flag off retracts nothing.
+            msg_parts.append(
+                "Stop answering in JSON. Reply in ordinary prose from now on, "
+                "unless I ask for JSON again."
+            )
+            self._json_mode_used = False
         if file_texts:
             for i, fc in enumerate(file_texts, 1):
                 msg_parts.append(f"[Attached file {i}]:\n{fc}")
