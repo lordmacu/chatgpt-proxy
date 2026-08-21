@@ -2989,6 +2989,73 @@ def _store_audio(content: bytes, key: str, voice: str, fmt: str, media: str) -> 
     return {"url": served, "content_type": media, "bytes": len(content)}
 
 
+# ChatGPT's own ten voices. They were already named in `_synthesize`'s
+# docstring and nowhere else -- not validated, not exposed -- which is how a
+# request for OpenAI's default voice reached the backend and took the whole
+# endpoint down. See `resolve_voice`.
+NATIVE_VOICES: tuple[str, ...] = (
+    "juniper", "cove", "ember", "breeze", "maple",
+    "vale", "glimmer", "orbit", "fathom", "ridge",
+)
+
+# OpenAI's voice names mapped onto ChatGPT's, so a client written against the
+# OpenAI API works unchanged -- the same thing perplexity-proxy does with its
+# VOICE_MAP.
+#
+# HONESTY ABOUT THIS TABLE: only `alloy -> juniper` means anything, because
+# juniper is this backend's default and alloy is OpenAI's. The other pairings
+# are ARBITRARY. They were not chosen by comparing timbre, because nobody has
+# listened to all ten and matched them; they exist so that a client asking for
+# two different voices gets two different voices instead of the same one. Do
+# not read them as "echo sounds like cove".
+OPENAI_VOICE_MAP: dict[str, str] = {
+    "alloy":   "juniper",
+    "echo":    "cove",
+    "fable":   "vale",
+    "onyx":    "ember",
+    "nova":    "breeze",
+    "shimmer": "maple",
+    "ash":     "ridge",
+    "ballad":  "glimmer",
+    "coral":   "orbit",
+    "sage":    "fathom",
+    "verse":   "vale",
+    "marin":   "juniper",
+    "cedar":   "cove",
+}
+
+
+def resolve_voice(voice: str) -> str:
+    """A voice name this backend will actually accept, or a 400 explaining why.
+
+    Validating BEFORE the round trip is the whole point. An unknown voice used
+    to reach `/backend-api/synthesize`, which does not answer with a clean 4xx
+    -- it closes the connection mid-body, so httpx raised RemoteProtocolError
+    and the endpoint died with a bare `500 Internal Server Error`. That is the
+    worst of both worlds: the client learns nothing, and the gateway in front
+    reads 500 as "this route is broken", accumulates suspicion against it and
+    fails over -- punishing a healthy provider for a client's typo.
+
+    It also used to cost a chat message before failing: synthesis works by
+    making the model echo the text first, so the bad request was paid for and
+    then thrown away.
+    """
+    name = (voice or "").strip().lower()
+    if not name:
+        return "juniper"
+    if name in NATIVE_VOICES:
+        return name
+    if name in OPENAI_VOICE_MAP:
+        return OPENAI_VOICE_MAP[name]
+    raise HTTPException(400, detail={"error": {
+        "type": "invalid_request_error",
+        "message": f"unknown voice '{voice}'",
+        "param": "voice",
+        "supported": list(NATIVE_VOICES),
+        "openai_aliases": sorted(OPENAI_VOICE_MAP),
+    }})
+
+
 class SpeechRequest(BaseModel):
     input:  str
     voice:  str = "juniper"
@@ -3104,6 +3171,11 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
     then synthesizes it. Costs one chat message per call. Voices: juniper, cove,
     ember, breeze, maple, vale, glimmer, orbit, fathom, ridge.
     """
+    # Resolved here rather than in each endpoint: three call sites share this
+    # function, and a validation that lives in only two of them is the kind
+    # that drifts.
+    voice = resolve_voice(voice)
+
     # Have the model reproduce the text; retry once if it isn't verbatim.
     session = None
     reply = ""
@@ -3124,10 +3196,20 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
                 "message": "could not obtain the message to synthesize", "type": "upstream_error"}})
 
         path = "/backend-api/synthesize"
-        r = await session.client.get(f"{BASE}{path}",
-            headers={**_base_headers(session.device_id), "X-OpenAI-Target-Path": path},
-            params={"conversation_id": cid, "message_id": mid,
-                    "voice": voice, "format": fmt})
+        try:
+            r = await session.client.get(f"{BASE}{path}",
+                headers={**_base_headers(session.device_id), "X-OpenAI-Target-Path": path},
+                params={"conversation_id": cid, "message_id": mid,
+                        "voice": voice, "format": fmt})
+        except _httpx.HTTPError as e:
+            # This backend answers a bad parameter by closing the connection
+            # mid-body rather than with a status, so httpx raises instead of
+            # returning. Letting that escape produced a bare 500, which the
+            # gateway reads as "the route is broken" -- 502 says the truth:
+            # upstream misbehaved on this call.
+            raise _SynthesizeFailed(502, {"error": {
+                "type": "upstream_error",
+                "message": f"synthesize transport failure: {type(e).__name__}: {e}"}})
     finally:
         if session:
             await session.close()
@@ -3144,6 +3226,20 @@ async def _synthesize(text: str, voice: str, fmt: str, model: str) -> Synthesize
     media = r.headers.get("content-type", "audio/mpeg")
     return Synthesized(audio=r.content, media_type=media, text=reply, exact_match=exact,
                        voice=voice, format=fmt, conversation_id=cid, message_id=mid)
+
+
+@app.get("/v1/audio/voices")
+async def list_voices():
+    """The voices this proxy accepts. There was no way to ask before.
+
+    That gap is why the bug existed at all: with nothing to consult, a caller
+    reasonably sends OpenAI's default `alloy`, which this backend does not
+    have. `native` are ChatGPT's own; `openai_aliases` maps OpenAI's names onto
+    them -- see OPENAI_VOICE_MAP for how little those pairings claim.
+    """
+    return {"default": "juniper",
+            "native": list(NATIVE_VOICES),
+            "openai_aliases": OPENAI_VOICE_MAP}
 
 
 @app.post("/v1/audio/speech")
