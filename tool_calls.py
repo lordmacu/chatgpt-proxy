@@ -46,10 +46,13 @@ SENTINEL  = "<<<TOOL_CALL>>>"
 NO_CALL   = "<<<NO_TOOL>>>"
 NEED_INFO = "<<<NEED_INFO>>>"
 
-# gpt-5-3-mini over 8 runs of the heaviest case: 8/8 correct, p50 2.5s, max 4.1s.
-# `auto` matches it on accuracy (8/8, p50 3.2s); gpt-5-5 also scores 8/8 but its
-# tail reached 30.7s, which is the wrong trade for a call whose whole job is to
-# decide what to run next.
+# ANONYMOUS MODE IGNORES THIS. Measured 2026-08-20: asking for gpt-5-3-mini and
+# asking for gpt-5-5 both come back with resolved_model_slug=gpt-5-6 -- the only
+# model_slug that echoes the request is the one on the user message we sent. So
+# the timings this default was once chosen for (gpt-5-3-mini p50 2.5s vs
+# gpt-5-5's 30.7s tail) can only have been an authenticated measurement, and
+# changing this will not change an anonymous extraction. Kept because an
+# account-backed session does honour it.
 EXTRACTOR_MODEL = os.environ.get("TOOL_EXTRACTOR_MODEL", "gpt-5-3-mini")
 
 # Switch the whole feature off without touching a caller: the proxy falls back to
@@ -237,7 +240,12 @@ def _walk(value: Any, schema: dict, path: str = "") -> list[str]:
     want = schema.get("type")
     py = {"string": str, "integer": int, "number": (int, float), "array": list,
           "object": dict, "boolean": bool}.get(want)
-    if py and not isinstance(value, py) or (want == "integer" and isinstance(value, bool)):
+    # bool is a subclass of int in Python, so True satisfies isinstance() for
+    # both "integer" and "number" unless it is excluded by hand. Without the
+    # second clause a model that answered `true` where a quantity belonged
+    # passed this check and the bad call went out.
+    wrong_bool = want in ("integer", "number") and isinstance(value, bool)
+    if (py and not isinstance(value, py)) or wrong_bool:
         return [f"{path or '<root>'}: expected {want}"]
     if schema.get("enum") and value not in schema["enum"]:
         errs.append(f"{path or '<root>'}: {value!r} not in enum")
