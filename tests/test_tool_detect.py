@@ -173,6 +173,22 @@ def test_a_draft_inside_a_reasoning_block_is_not_the_answer():
     assert parse(text) == [{"name": "get_weather", "arguments": {"city": "Lima"}}]
 
 
+def test_a_reasoning_block_is_stripped_even_when_nothing_follows_it():
+    # Mutation testing caught the case above passing for the wrong reason: the
+    # draft sits mid-message, so the prose heuristic already rejected it and
+    # the test held with think-stripping disabled. Here the draft is the ONLY
+    # candidate and it ends the message, so nothing but the strip can save it.
+    text = '<think>{"name":"get_weather","arguments":{"city":"DRAFT"}}</think>'
+    assert parse(text) is None
+
+
+def test_a_reasoning_block_before_a_lone_call_does_not_shadow_it():
+    text = ('<reasoning>I could call {"name":"send_email","arguments":'
+            '{"to":"draft@x.com"}}</reasoning>'
+            '{"name":"get_weather","arguments":{"city":"Lima"}}')
+    assert parse(text) == [{"name": "get_weather", "arguments": {"city": "Lima"}}]
+
+
 def test_an_unclosed_reasoning_block_is_scratchpad_to_the_end():
     text = '<think>maybe {"name":"get_weather","arguments":{"city":"Lima"}}'
     assert parse(text) is None
@@ -270,6 +286,16 @@ def test_our_markers_still_decide_outright():
         tc.NEED_INFO + '{"function":"send_email","missing":["to"]}', NAMES)
     assert status == "NEED_INFO"
     assert notes[0]["missing"] == ["to"]
+
+
+def test_an_explicitly_empty_calls_array_is_no_call_not_unreadable():
+    # The model chose the call envelope and said there are none. Reading that
+    # as unreadable spends a repair round trip on a perfectly clear answer.
+    # (Regression: the pre-detector parser got this right, and the port lost
+    # it, because to DETECTION an empty list is correctly not a call.)
+    calls, notes = tc.parse_envelope(tc.SENTINEL + '{"calls":[]}', NAMES, FUNCS)
+    assert calls == []
+    assert "invalid-json" not in notes
 
 
 def test_a_reply_in_another_dialect_no_longer_costs_a_repair():

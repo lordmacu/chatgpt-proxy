@@ -210,6 +210,17 @@ def parse_envelope(text: str, valid_names: set, functions=None) -> tuple[Any, li
         calls = _detect.parse_tool_calls(payload, valid_names, functions)
         if calls is not None:
             return calls, notes
+        # An explicitly EMPTY calls array is the model choosing this envelope
+        # and saying there are none. Detection is right to see no call there,
+        # but at this layer the emptiness is the answer -- reading it as
+        # unreadable would spend a repair round trip on a perfectly clear
+        # reply. Only the documented shape counts: a bare [] elsewhere is data.
+        try:
+            decoded = json.loads(_extract_json(payload))
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict) and decoded.get("calls") == []:
+            return [], notes
         notes.append("marker-payload-unreadable")
     else:
         notes.append("no-marker")
