@@ -19,15 +19,15 @@ Qué se puede hacer con el proxy según el tipo de cuenta detrás del token:
 | Custom instructions (`GET·POST /v1/custom-instructions`) | ❌ | ✅ | ✅ |
 | Suggestions (`GET /v1/suggestions`) | ❌ | ✅ | ✅ |
 | Gizmos / chat como GPT (`GET /v1/gizmos`, `model:"g-..."`) | ❌ | ✅ (0 propios) | ✅ (tus GPTs) |
-| Historial (`GET /v1/conversations`, `/{id}`) | ❌ | ✅ | ✅ |
+| Historial (`GET /v1/conversations`, `/{id}`) | ✅ ⁴ | ✅ | ✅ |
 | Biblioteca (`GET /v1/library`, `/usage`, `/{id}/download`, delete…) | ❌ | ✅ | ✅ |
 | TTS (`POST /v1/audio/speech`, `GET /v1/audio/from-message`) | ❌ | ✅ | ✅ |
 | STT (`POST /v1/audio/transcriptions`) | ❌ | ✅ | ✅ |
 | **Imágenes** (`POST /v1/images/generations`) | ❌ | **❌ bloqueado** | ✅ |
 | **Visión** (imagen como input en el chat, `image_url`) | ❌ | ✅ ² | ✅ |
-| **Endpoints accesibles** | **6/15** | **17/18** | **18/18** |
+| **Endpoints accesibles** | **7/15** | **17/18** | **18/18** |
 
-Los totales son la salida de `smoke_test.py --spend`: **anónima (6/15) y Go
+Los totales son la salida de `smoke_test.py --spend`: **anónima (7/15) y Go
 (18/18) remedidas el 2026-08-21**; la columna free se derivó de su medición
 anterior (16/17) sumando `/v1/tool-calls`, que anda hasta sin cuenta. Los
 denominadores difieren porque hay sondas condicionales: `gizmos/{id}`,
@@ -57,6 +57,23 @@ llamar es una petición aparte, así que un turno donde ninguna función aplica 
 dos. Un parámetro requerido que la petición no dice se responde preguntando
 (`status: "need_info"`), no adivinando. `TOOL_EMULATION=0` la apaga, y entonces
 `GET /health` reporta `tools: false` — es el único caso en que esta fila es ❌.
+
+⁴ **Historial anónimo** no es el historial de una cuenta, y por eso el booleano
+`conversations` de `GET /health` sigue en `false` en anónima: ese contrato
+describe el historial **server-side de la cuenta**, que es otra cosa. Lo que sí
+pasa es que los turnos anónimos **se guardan upstream** y el `device_id` es toda
+la credencial — un cliente nuevo sin cookies los lee con solo llevarlo, incluso
+después de cerrar la sesión (medido 2026-08-21). Lo único que se perdía era la
+llave, cuando el pool desalojaba la sesión a los 30 min. Ahora se guarda en
+SQLite ([`conv_store.py`](conv_store.py)) — **solo el binding
+`conversation_id → device_id`, nunca los mensajes**, que siguen siendo del
+vendor. El listado sí es local: `/backend-anon/conversations` devuelve `total=0`
+incluso para el device dueño de dos conversaciones vivas.
+En Docker **exige un volumen montado** (`CONV_DB_PATH`, ver `docker-compose.yml`):
+sin él el índice se borra en cada deploy, que es justo lo que vino a evitar.
+Ojo con el alcance: las filas se separan por el bearer token, y quien no manda
+token cae en el namespace `anonymous` compartido — el mismo que ya comparten el
+pool de sesiones y el file store.
 
 ## Límites (cupos por período)
 
@@ -91,8 +108,8 @@ DALL·E) — no la rechaza ni pide upgrade —, pero la generación **devuelve v
 
 ## Resumen
 
-- **Anónima** → solo chat (con function calling), traducir, modelos y límites. Nada
-  de cuenta, historial, archivos, voz ni imágenes.
+- **Anónima** → chat (con function calling), traducir, modelos, límites y su propio
+  historial local. Nada de cuenta, archivos, voz ni imágenes.
 - **Free** → casi todo (17/18), **incluida voz completa (TTS + STT) y visión**. Lo
   único bloqueado es **generar imágenes** (la visión/input sí anda); los cupos son
   mínimos y el storage 8× menor.

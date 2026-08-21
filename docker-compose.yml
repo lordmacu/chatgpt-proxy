@@ -4,8 +4,15 @@ services:
     ports:
       - "8888:8000"
     restart: unless-stopped
+    volumes:
+      # Without this the anonymous conversation index is erased on every deploy,
+      # and with it the device ids that are the only key to those conversations.
+      - proxy-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
     dns:
       - 8.8.8.8
       - 1.1.1.1
+
+volumes:
+  proxy-data:

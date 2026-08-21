@@ -16,9 +16,10 @@ Endpoints — [A] works anonymously, [L] needs a logged-in account.
   [L] GET  /v1/account                 — plan, id
   [L] GET|POST /v1/custom-instructions — the account's custom instructions
   [L] GET  /v1/gizmos[/{id}]           — custom GPTs (also model: "g-...")
-  [L] GET  /v1/conversations           — the account's server-side history
-  [A] GET  /v1/conversations/{id}      — anonymous only while this proxy still
-                                         holds the session that created it
+  [A] GET  /v1/conversations           — the account's history; anonymously,
+                                         this proxy's own index (conv_store.py)
+  [A] GET  /v1/conversations/{id}      — anonymously, any conversation this
+                                         proxy created and recorded the device for
   [L] GET  /v1/library[...]            — the account's file library
   [L] GET  /v1/suggestions             — prompt-library starters
   [L] POST /v1/audio/transcriptions    — speech-to-text
@@ -93,6 +94,7 @@ Sampling parameters:
 """
 import io
 import os
+import sys
 import uuid
 import json
 import time
@@ -118,6 +120,7 @@ import httpx as _httpx
 
 import auth
 import capabilities
+import conv_store
 import tool_calls as _tc
 
 # ---------------------------------------------------------------------------
@@ -1685,6 +1688,40 @@ async def _image_via_chat_completions(
     })
 
 
+def _positive_int(raw: Optional[str], default: int) -> int:
+    """A query param that must be a non-negative int, or the default.
+
+    Garbage falls back rather than 422ing: these are pagination knobs on a
+    listing, and a caller that sends limit=abc wants a page, not a validation
+    lecture.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _remember_conversation(user_id: str, session) -> None:
+    """Index an anonymous turn so it outlives the session that made it.
+
+    Anonymous only. An account already has server-side history and a listing to
+    match, so recording it here would put chat titles on this disk for nothing.
+
+    Never lets a bookkeeping failure break a turn that already succeeded: the
+    answer is on its way to the caller by the time this runs, and a locked or
+    unwritable database is a reason to lose the index entry, not the reply.
+    """
+    if auth.is_authenticated() or not getattr(session, "conversation_id", None):
+        return
+    try:
+        conv_store.record(user_id, session.conversation_id, session.device_id,
+                          getattr(session, "last_title", None))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[conv_store] no se pudo indexar {session.conversation_id}: {e}",
+              file=sys.stderr, flush=True)
+
+
 def _build_search_metadata(session) -> dict:
     """
     Build the search_metadata object from the session state.
@@ -1902,6 +1939,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     yield b"data: [DONE]\n\n"
                     return
 
+            _remember_conversation(user_id, cur_session)
+
             # Resolve DALL-E images and emit them as image_url content delta parts
             if cur_session._pending_image_ids:
                 await cur_session.resolve_image_urls()
@@ -1970,6 +2009,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
             except Exception as e:
                 raise HTTPException(500, str(e))
+
+        _remember_conversation(user_id, cur_session)
 
         # Resolve any DALL-E images collected during streaming
         if cur_session._pending_image_ids:
@@ -2826,18 +2867,46 @@ async def conversations(request: Request):
     """List the account's conversation history, most recent first.
 
     Proxies /backend-api/conversations. Query params: `offset` (default 0),
-    `limit` (default 28), `order` (default 'updated'). Authenticated only.
+    `limit` (default 28), `order` (default 'updated').
+
+    Anonymously the vendor has nothing to proxy: /backend-anon/conversations
+    answers total=0 even for the device that owns two live conversations
+    (measured 2026-08-21). So that case is served from this proxy's own index --
+    see conv_store.py -- which lists the conversations THIS proxy created and
+    can still open, and nothing else.
+
+    require_capability stays on the authenticated path only, for the same reason
+    the detail route below carries none: the `conversations` boolean describes
+    the ACCOUNT's server-side history, and a local index of what this proxy
+    created is a different thing. The capability set is a byte-for-byte contract
+    with the gateway, so it keeps meaning exactly what it meant.
     """
-    await require_capability("conversations")
+    user_id = _get_user_id(request)
     if not auth.is_authenticated():
-        return _needs_account()
+        limit  = _positive_int(request.query_params.get("limit"), 28)
+        offset = _positive_int(request.query_params.get("offset"), 0)
+        rows, total = conv_store.listing(user_id, limit, offset)
+        return {
+            "items": [{
+                "id":          r["conversation_id"],
+                "title":       r["title"],
+                "snippet":     None,
+                "create_time": r["create_time"],
+                "update_time": r["update_time"],
+                "is_archived": False,
+                "is_starred":  False,
+                "gizmo_id":    None,
+            } for r in rows],
+            "total": total, "limit": limit, "offset": offset,
+        }
+
+    await require_capability("conversations")
 
     params = {
         "offset": request.query_params.get("offset", "0"),
         "limit":  request.query_params.get("limit", "28"),
         "order":  request.query_params.get("order", "updated"),
     }
-    user_id  = _get_user_id(request)
     pool     = _user_pool(user_id)
     sessions = list(pool._pool.values())
     if sessions:
@@ -2885,11 +2954,17 @@ async def conversation_detail(conversation_id: str, request: Request):
     `conversation_inaccessible` ("Log in to view this conversation."), and
     /backend-anon/conversations answers 200 with an empty page no matter what.
 
-    So anonymously this can only return a conversation THIS proxy created and
-    still holds a session for: the device id is the only credential there is,
-    and a fresh one cannot read anything. A conversation whose session has been
-    evicted (see SessionPool.TTL) is gone for good, and says so rather than
-    pretending an account would fix it.
+    So anonymously this can only return a conversation THIS proxy created: the
+    device id is the only credential there is, and a fresh one cannot read
+    anything.
+
+    It used to say a conversation whose session had been evicted was gone for
+    good. That was wrong, and remeasuring on 2026-08-21 is what showed it: a
+    fresh client with no cookies at all reads the conversation back as long as
+    it carries the original device id, and still does after the creating session
+    is closed. Nothing expires upstream at the 30 minute mark -- the proxy was
+    simply throwing away the key along with the session. conv_store.py keeps it,
+    so eviction no longer ends the conversation.
 
     No require_capability("conversations") here: that capability is about the
     account's server-side history, which is what the listing serves. Reading
@@ -2914,20 +2989,43 @@ async def conversation_detail(conversation_id: str, request: Request):
         # vendor, so guessing one would turn "we no longer hold that session"
         # into an opaque upstream error.
         owner = next((s for s in sessions if s.conversation_id == conversation_id), None)
-        if owner is None:
-            raise HTTPException(404, detail={"error": {
-                "message": "No anonymous session here owns that conversation. An "
-                           "anonymous conversation is readable only from the device "
-                           "that created it, so this proxy can return one only while "
-                           "it still holds that session.",
-                "type": "not_found_error", "param": "conversation_id",
-            }})
-        device_id, client, owns_client = owner.device_id, owner.client, False
+        if owner is not None:
+            device_id, client, owns_client = owner.device_id, owner.client, False
+        else:
+            # The session is gone, the conversation is not. Cookies turned out to
+            # be irrelevant -- a fresh client carrying the original device id
+            # reads it back, and still does after the creating session is closed
+            # (measured 2026-08-21) -- so the recorded device is enough.
+            known = conv_store.lookup(user_id, conversation_id)
+            if known is None:
+                raise HTTPException(404, detail={"error": {
+                    "message": "This proxy has no record of that anonymous "
+                               "conversation. An anonymous conversation is readable "
+                               "only from the device that created it, and only this "
+                               "proxy knows which device that was.",
+                    "type": "not_found_error", "param": "conversation_id",
+                }})
+            device_id, owns_client = known["device_id"], True
+            client = _httpx.AsyncClient(verify=True, timeout=15.0, follow_redirects=True)
 
     path = _api("/conversation/" + conversation_id)
     try:
         hdrs = {**_base_headers(device_id), "X-OpenAI-Target-Path": path}
         r = await client.get(f"{BASE}{path}", headers=hdrs)
+        # An indexed conversation the vendor no longer honours is pruned rather
+        # than left to be listed forever: how long an anonymous conversation
+        # survives upstream cannot be measured in one sitting, so the index is
+        # corrected by what the vendor answers instead of being trusted.
+        if r.status_code == 404:
+            if not authenticated:
+                conv_store.forget(user_id, conversation_id)
+            # Answering 404 rather than letting raise_for_status() escape as a
+            # 500: the conversation is genuinely not there, and a 500 would tell
+            # the caller this proxy is broken instead.
+            raise HTTPException(404, detail={"error": {
+                "message": "The backend no longer has that conversation.",
+                "type": "not_found_error", "param": "conversation_id",
+            }})
         r.raise_for_status()
         d = r.json()
     finally:

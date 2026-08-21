@@ -23,8 +23,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # If you add a .py file that main.py or chatgpt_client.py imports, add it HERE
 # in the same commit.
 COPY chatgpt_client.py main.py auth.py dpop.py session_web.py \
-     capabilities.py tool_calls.py tool_detect.py ./
+     capabilities.py tool_calls.py tool_detect.py conv_store.py ./
 
 ENV PYTHONUNBUFFERED=1
+# The anonymous conversation index. It holds the device ids that are the only
+# way to reopen an anonymous conversation, so it belongs on a MOUNTED VOLUME:
+# left inside the image layer it is wiped by the next deploy, which is the
+# exact durability the index exists to provide.
+ENV CONV_DB_PATH=/app/data/conversations.db
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
