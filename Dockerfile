@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # If you add a .py file that main.py or chatgpt_client.py imports, add it HERE
 # in the same commit.
 COPY chatgpt_client.py main.py auth.py dpop.py session_web.py \
-     capabilities.py tool_calls.py ./
+     capabilities.py tool_calls.py tool_detect.py ./
 
 ENV PYTHONUNBUFFERED=1
 
