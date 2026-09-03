@@ -117,6 +117,7 @@ from chatgpt_client import (
     QuotaExceededError, _extract_json, _IMAGE_STORE_DIR, _api,
 )
 import httpx as _httpx
+import chatgpt_client as _chatgpt_client_module
 
 import auth
 import capabilities
@@ -438,6 +439,67 @@ app = FastAPI(
     version="2.4.0",
     lifespan=lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Request tracing
+#
+# This proxy is the last hop and the slowest one: an image spends thirty to
+# fifty seconds here while ChatGPT draws, and from outside that is
+# indistinguishable from a slow gateway or a stalled network. The app mints an
+# id per turn, the gateway forwards it (llm_libre.tracing), and these lines
+# close the chain -- one string grepped in three logs, and the fifty seconds
+# land on whichever hop actually spent them.
+#
+# The alphabet is narrow on purpose: the id is echoed into a response header and
+# into a log line, so it is attacker-controlled text and a newline in it would
+# forge an entry. Anything outside the pattern is replaced, never reflected.
+# ---------------------------------------------------------------------------
+import contextvars as _contextvars
+import re as _re
+
+TRACE_HEADER = "X-Request-Id"
+_TRACE_SAFE = _re.compile(r"\A[A-Za-z0-9_.:-]{1,64}\Z")
+_trace_id: "_contextvars.ContextVar[str]" = _contextvars.ContextVar(
+    "chatgpt_proxy_trace_id", default="")
+
+
+def current_trace_id() -> str:
+    """The id of the request being served, or "" outside one (a background
+    refresh is the proxy acting on its own, not on a caller's behalf, and
+    tagging it with a caller's id would make the log lie)."""
+    return _trace_id.get()
+
+
+def _sanitise_trace_id(raw: str | None) -> str:
+    if raw and _TRACE_SAFE.match(raw):
+        return raw
+    # `px-` says the proxy minted it, which is itself information: a trace that
+    # starts here has lost the app's and the gateway's half.
+    return "px-" + uuid.uuid4().hex[:16]
+
+
+# Wired here, not imported there: chatgpt_client is imported BY this module, so
+# it cannot import back. See its `trace_id_provider`.
+_chatgpt_client_module.trace_id_provider = current_trace_id
+
+
+@app.middleware("http")
+async def _trace_requests(request: Request, call_next):
+    rid = _sanitise_trace_id(request.headers.get(TRACE_HEADER))
+    token = _trace_id.set(rid)
+    t0 = time.monotonic()
+    try:
+        response = await call_next(request)
+    finally:
+        _trace_id.reset(token)
+    ms = (time.monotonic() - t0) * 1000
+    response.headers[TRACE_HEADER] = rid
+    # Always printed, not gated behind DEBUG like `_log`: the whole point is to
+    # be readable in production, where the latency being measured happens.
+    print(f"[{rid}] {request.method} {request.url.path} -> "
+          f"{response.status_code} in {ms:.0f}ms", flush=True)
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Optional API token guard (set API_TOKEN env var to enable)

@@ -25,6 +25,31 @@ _IMAGE_CACHE_FILE = pathlib.Path("/tmp/chatgpt_image_cache.json")
 _image_cache_mem: dict = {}
 
 
+
+# Labels this module's timing lines with the request's trace id.
+#
+# A hook rather than an import because main imports THIS module: importing it
+# back would be a cycle. main assigns `chatgpt_client.trace_id_provider =
+# current_trace_id` at import time, and the default keeps the module usable on
+# its own (the CLI, a test) with the label simply absent.
+def _no_trace() -> str:
+    return ""
+
+
+trace_id_provider = _no_trace
+
+
+def _phase(name: str, detail: str = "") -> None:
+    """Always printed, unlike `_log`, which is gated behind DEBUG.
+
+    These are the numbers that answer "where did the fifty seconds go", and a
+    measurement only available with DEBUG on is not available in production --
+    which is the only place the latency being measured actually happens.
+    """
+    rid = trace_id_provider() or "-"
+    print(f"[{rid}] proxy.{name}{' ' + detail if detail else ''}", flush=True)
+
+
 def _image_cache_load() -> dict:
     global _image_cache_mem
     if not _image_cache_mem:
@@ -989,6 +1014,8 @@ class ChatGPTSession:
         """
         if not self._pending_image_ids:
             return
+        _resolve_t0 = time.monotonic()
+        _resolve_bytes = 0
         _IMAGE_STORE_DIR.mkdir(parents=True, exist_ok=True)
         cache = _image_cache_load()
         hdrs  = {**_base_headers(self.device_id)}
@@ -1053,6 +1080,7 @@ class ChatGPTSession:
                     local_filename = f"{fid[:32]}{ext}"
                     local_path     = _IMAGE_STORE_DIR / local_filename
                     local_path.write_bytes(img_r.content)
+                    _resolve_bytes += len(img_r.content)
                     _log(f"[img] saved {len(img_r.content)} B → {local_filename}")
                     # Update cache entry with local filename
                     _image_cache_mem[fid]["local_filename"] = local_filename
@@ -1075,6 +1103,13 @@ class ChatGPTSession:
             except Exception as e:
                 _log(f"[img] error for {fid[:28]}: {e}")
 
+        # The split that matters: everything BEFORE this call is ChatGPT
+        # drawing, everything inside it is transfer. Without the two apart, a
+        # fifty-second image is one opaque number and there is no way to know
+        # whether attacking the network would buy anything.
+        _phase("imagen.descarga",
+               f"ms={(time.monotonic() - _resolve_t0) * 1000:.0f} "
+               f"bytes={_resolve_bytes}")
         self._pending_image_ids.clear()
 
     async def close(self):
