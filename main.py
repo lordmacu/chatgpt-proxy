@@ -2192,8 +2192,14 @@ def _prompt_with_size(prompt: str, size: "str | None") -> str:
     "horizontal" is an instruction it already understands. Exact pixel sizes were
     never deliverable here and pretending otherwise is the bug being fixed.
 
-    A square size appends nothing. The common path should not pay tokens, and a
-    gratuitous "make it square" also steers the composition for no reason.
+    A square size asks for square, and that was MEASURED rather than assumed.
+    The first version of this appended nothing for a square size, on the theory
+    that square was the upstream default. Six generations said otherwise: of the
+    three that carried no hint, two came back 1024x1536 and one 1402x1122. There
+    is no square default -- unhinted, the tool picks a shape -- so a caller
+    asking for 1024x1024 got a portrait image and no warning, which is the exact
+    bug this function exists to fix. The ten tokens it costs buy the field its
+    meaning back.
 
     Unreadable input changes nothing and never raises: the value arrives verbatim
     from a client, and a size that cannot be parsed is a reason to ignore it, not
@@ -2208,10 +2214,14 @@ def _prompt_with_size(prompt: str, size: "str | None") -> str:
         width, height = (int(p) for p in parts)
     except ValueError:
         return prompt
-    if width <= 0 or height <= 0 or width == height:
+    if width <= 0 or height <= 0:
         return prompt
-    shape = "vertical (más alta que ancha)" if height > width \
-        else "horizontal (más ancha que alta)"
+    if width == height:
+        shape = "cuadrada (misma altura que anchura)"
+    elif height > width:
+        shape = "vertical (más alta que ancha)"
+    else:
+        shape = "horizontal (más ancha que alta)"
     return f"{prompt}\n\n(Genera la imagen en formato {shape}.)"
 
 

@@ -17,11 +17,17 @@ from main import _prompt_with_size
 PROMPT = "un gato naranja"
 
 
-def test_a_square_size_leaves_the_prompt_exactly_as_it_came():
-    # The common path stays untouched: appending "make it square" to every
-    # prompt spends tokens and steers the drawing for no reason.
+def test_a_square_size_asks_for_a_square_image():
+    # It has to ask, and this was MEASURED, not assumed. The first version of
+    # this function appended nothing for a square size, on the theory that
+    # square was the upstream default. Six generations later: of the three that
+    # carried no hint, two came back 1024x1536 and one 1402x1122. There is no
+    # square default -- unhinted, the tool picks a shape -- so "1024x1024" only
+    # means anything if it is said out loud.
     for square in ("1024x1024", "512x512", "2048x2048"):
-        assert _prompt_with_size(PROMPT, square) == PROMPT
+        out = _prompt_with_size(PROMPT, square)
+        assert out.startswith(PROMPT)
+        assert "cuadrada" in out.lower(), out
 
 
 def test_a_taller_size_asks_for_a_vertical_image():
