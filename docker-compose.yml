@@ -33,6 +33,18 @@ services:
       - CHATGPT_SESSION_COOKIE=${CHATGPT_SESSION_COOKIE:-}
       - CHATGPT_UA=${CHATGPT_UA:-}
       - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
+      # Sin esto la clave DPoP cae, por defecto, junto al código en /app (ver
+      # KEY_FILE en dpop.py): capa de imagen, no volumen. Se pierde en cada
+      # recreación del contenedor, y con ella la sesión, porque los tokens
+      # quedan atados al thumbprint de ESA clave -- un refresh con una clave
+      # nueva responde `invalid_dpop_proof` y toca volver a entrar.
+      #
+      # Va literal y no como `${DPOP_KEY_FILE:-...}` a propósito: es una ruta
+      # interna de la imagen, no una perilla de despliegue, y Coolify registra
+      # como variable de la app toda referencia `${...}` que encuentra en este
+      # archivo -- una que quedara vacía anularía el default y devolvería el
+      # problema en silencio.
+      - DPOP_KEY_FILE=/app/data/dpop_key.pem
     volumes:
       # Sin esto el índice de conversaciones anónimas se borra en cada deploy,
       # y con él los device ids que son la única llave a esas conversaciones.
