@@ -2176,6 +2176,45 @@ async def tool_calls_endpoint(req: ToolCallsRequest, request: Request):
 # /v1/images/generations
 # ---------------------------------------------------------------------------
 
+def _prompt_with_size(prompt: str, size: "str | None") -> str:
+    """Turn a `size` into words, because words are the only channel there is.
+
+    The upstream flow has no size field. Verified against the decompiled
+    official app (com.openai.chatgpt 1.2026.223): `image_size` and
+    `aspect_ratio` appear ONLY in a telemetry event, and no file in the whole
+    APK carries both `image_gen` and a size key -- the client reports the shape
+    that came back, it never asks for one. The picture is drawn by a tool the
+    model drives in natural language, so an aspect ratio can only be requested
+    the way a person would request it.
+
+    Which is why this translates ORIENTATION and not pixels: asking a drawing
+    tool for "1536x1024" invites it to render the digits into the picture, while
+    "horizontal" is an instruction it already understands. Exact pixel sizes were
+    never deliverable here and pretending otherwise is the bug being fixed.
+
+    A square size appends nothing. The common path should not pay tokens, and a
+    gratuitous "make it square" also steers the composition for no reason.
+
+    Unreadable input changes nothing and never raises: the value arrives verbatim
+    from a client, and a size that cannot be parsed is a reason to ignore it, not
+    a reason to fail an image the caller is spending a minute of wall clock on.
+    """
+    if not isinstance(size, str):
+        return prompt
+    parts = size.strip().lower().split("x")
+    if len(parts) != 2:
+        return prompt
+    try:
+        width, height = (int(p) for p in parts)
+    except ValueError:
+        return prompt
+    if width <= 0 or height <= 0 or width == height:
+        return prompt
+    shape = "vertical (más alta que ancha)" if height > width \
+        else "horizontal (más ancha que alta)"
+    return f"{prompt}\n\n(Genera la imagen en formato {shape}.)"
+
+
 class ImageGenerationRequest(BaseModel):
     prompt: str
     model: str = "dall-e-3"
@@ -2195,11 +2234,12 @@ async def image_generations(req: ImageGenerationRequest, request: Request):
                        "(set CHATGPT_ACCESS_TOKEN).", "type": "auth_error"}})
     user_id  = _get_user_id(request)
     pool     = _user_pool(user_id)
-    msgs_raw = [{"role": "user", "content": req.prompt}]
+    prompt = _prompt_with_size(req.prompt, req.size)
+    msgs_raw = [{"role": "user", "content": prompt}]
     _key, session = await pool.get(msgs_raw)
 
     async for _ in session.stream_message(
-        req.prompt,
+        prompt,
         model="auto",
         force_use_tools=True,
     ):
